@@ -1,0 +1,66 @@
+sequenceDiagram
+    autonumber
+    actor User as 前端 / 调用方
+    participant R as backtest router
+    participant S as BacktestService
+    participant DS as data_source 模块
+    participant QF as QuotationFetcher
+    participant L1 as L1Reader
+    participant BE as BacktestBridge / 上游引擎
+
+    rect rgb(238, 244, 255)
+    Note over User,BE: 场景 1：B2 单标的 live 实时回测（需求 1）
+    User->>R: POST /api/v1/backtest/run {codes:[600519], data_source:"live", start, end}
+    R->>R: live 且 len(codes)>1 → 422（fail-loud）
+    R->>S: run(job_id, req)
+    loop 每个标的
+        S->>S: _read_frame(profile, code, start, end, "live")
+        S->>DS: fetch_live_frame(fetcher, profile, code, start, end)
+        DS->>QF: fetch_kline("CN", code, years=_live_years_for, exchange, adjust=NONE)
+        QF-->>DS: list[Bar]（vol=手，未复权，RD-8/RD-5 已对齐）
+        DS->>DS: bars_to_frame → 过滤 [start, end]
+        DS-->>S: DataFrame（datetime/open/high/low/close/vol/amount）
+        S->>BE: run_strategy_backtest(frame, strategy, params, cash, ...)
+        BE-->>S: 完整结果
+    end
+    S->>S: _combine → 落 BacktestResultStore
+    S-->>R: BacktestRunResult(summary)
+    R-->>User: Job 信封（B3 轮询 → B4 完整结果）
+    end
+
+    rect rgb(238, 250, 238)
+    Note over S,QF: 场景 2：auto 分支（本地优先，缺失转实时）
+    S->>DS: local_has_data(reader, profile, code)
+    alt 本地文件存在
+        DS-->>S: True
+        S->>L1: read_daily_frame(exchange, code)
+        L1-->>S: DataFrame（损坏/为空 → DataIntegrityError 显式抛，不降级）
+    else 本地无此标的（合法回退）
+        DS-->>S: False
+        S->>QF: fetch_kline(...)（同 live）
+    end
+    end
+
+    rect rgb(255, 248, 238)
+    Note over User,SS: 场景 3：数据湖自动增量（需求 2）
+    participant MP as MarketProfile(CN)
+    participant DL as DataLake
+    participant SS as SyncStateStore
+    participant SCH as IncrementalSyncScheduler
+    participant APS as APScheduler
+
+    User->>SCH: Kuantix serve lifespan → start()
+    SCH->>APS: add_job(cron mon-fri 16:30, max_instances=1, coalesce=true)
+    SCH->>SCH: 启动检查（daemon 线程）
+    SCH->>MP: is_trading_day(now) / is_open_now(now)
+    alt 满足条件（交易日且盘后且湖非空且今日未同步）
+        SCH->>SCH: _acquire_lock()（flock 单例）
+        SCH->>DL: sync_incremental("CN")
+        DL-->>SCH: SyncHandle → wait()
+        SCH->>SS: update(done, trigger, result)
+    else 跳过（节假日 / 交易时段 / 空湖 / 今日已同步）
+        SCH->>SS: update(skipped, reason)
+    end
+    APS-->>SCH: 16:30 触发 _cron_job → _dispatch("cron")
+    DL->>SS: status() 读 last_sync（D1 可观测）
+    end

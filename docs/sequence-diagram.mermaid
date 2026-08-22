@@ -1,0 +1,76 @@
+sequenceDiagram
+    autonumber
+    participant U as User/CLI
+    participant DL as DataLake
+    participant UE as UniverseEnumerator
+    participant QF as QuotationFetcher
+    participant VW as VipdocWriter
+    participant CR as CoefficientResolver
+    participant QZ as QuarantineStore
+    participant MK as MarketProfile(CN)
+
+    %% ===== 流程1：全量建湖（P0 关键路径，含已验证红线）=====
+    rect rgb(235,245,255)
+    note over U,QZ: 流程1 — Kuantix data sync --market CN --years 10
+    U->>DL: sync_full(market=CN, years=10, workers=4)
+    DL->>MK: is_trading_day / session 校验
+    DL->>UE: enumerate()
+    loop 每页（RD-10：每页新建 TdxClient）
+        UE->>UE: get_security_list(page) 新建连接
+        UE-->>DL: List[Security] (5209 只)
+    end
+    loop 并发 workers=4，断点续传
+        DL->>QF: fetch_kline(market, code, years=10)
+        QF->>QF: MacClient.get_stock_kline（A股）
+        QF->>QF: vol 股→手 ÷100（RD-8）
+        QF-->>DL: List[Bar]
+        DL->>CR: detect_coeff(filename)
+        CR-->>VW: (price_coeff, vol_coeff) 来自上游表（NF-25）
+        VW->>VW: uint32 上界校验（RD-9）；超限→reject_unknown
+        alt 证券类型=UNKNOWN（T2）
+            VW->>QZ: add(entry) 显式拒绝入隔离区
+        else 正常
+            VW->>VW: write_daily(bars, path) 编码+fsync
+            VW->>VW: 回读末尾 N 条比对（NF-27，容差<0.001）
+            VW-->>DL: written count
+        end
+    end
+    DL-->>U: SyncHandle（进度/已完成/失败/隔离区）
+    end
+
+    %% ===== 流程2：因子计算 + 有效性报告 =====
+    rect rgb(240,255,240)
+    note over U,QZ: 流程2 — Kuantix factor compute / report（全程读 L1，不走网络）
+    U->>FactorService: compute_factors(pool, range, factors)
+    FactorService->>QF: read L1 vipdoc（read_daily_bars）
+    QF-->>FactorService: DataFrame
+    FactorService->>FactorService: FactorEngine.compute_cross_section
+    FactorService->>FactorStore: save(factor, year) → Parquet+SQLite
+    FactorService-->>U: JobResult
+
+    U->>FactorService: report(factor)
+    FactorService->>FactorStore: load(factor) 
+    FactorService->>FactorService: FactorAnalyzer.full_report（需 scipy）
+    FactorService-->>U: FactorReport(IC_mean, IR, 分层收益, 换手率)
+    end
+
+    %% ===== 流程3：监控轮询 → 规则判定 → 推送 =====
+    rect rgb(255,245,235)
+    note over U,QZ: 流程3 — Kuantix monitor start（独立连接/进程，NF-28）
+    U->>MonitorLoop: start(watchlist, rules)
+    loop 每 5s（仅交易时段，MK 判定）
+        MonitorLoop->>QuoteFeed: poll(codes)
+        QuoteFeed->>QF: get_stock_quotes（独立 MacClient，与回补隔离）
+        QF-->>QuoteFeed: List[Quote]
+        QuoteFeed-->>MonitorLoop: List[Quote]
+        MonitorLoop->>RuleEngine: evaluate(quotes, rules)
+        RuleEngine-->>MonitorLoop: List[Alert]
+        loop 每条 Alert（冷却去重）
+            MonitorLoop->>Notifier: send(alert)
+            Notifier->>DesktopChannel: send(alert)
+            Notifier->>WebhookChannel: send(alert) 并发
+            Notifier-->>MonitorLoop: delivered
+            MonitorLoop->>EventBus: publish("alert", alert)
+        end
+    end
+    end

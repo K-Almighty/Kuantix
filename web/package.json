@@ -1,0 +1,29 @@
+{
+  "name": "Kuantix-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Kuantix 本地量化研究工作台 - 前端独立应用（Vue3 + Vite + TS + ECharts + Pinia）",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "echarts": "^5.5.1",
+    "pinia": "^2.2.2",
+    "vue": "^3.4.38",
+    "vue-router": "^4.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.16.5",
+    "@vitejs/plugin-vue": "^5.1.4",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.11",
+    "vue-tsc": "^2.1.6"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

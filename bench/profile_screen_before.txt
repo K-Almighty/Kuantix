@@ -1,0 +1,82 @@
+         448936112 function calls (448839456 primitive calls) in 144.499 seconds
+
+   Ordered by: cumulative time
+   List reduced from 1043 to 35 due to restriction <35>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.001    0.001  154.013  154.013 /Users/kongbiao/Downloads/开源量化/Kuantix/bench/profile_screen.py:27(target)
+        1    0.149    0.149  154.012  154.012 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/screen/service.py:293(screen_factor)
+     7582    0.615    0.000  151.617    0.020 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/screen/service.py:546(_safe_frame)
+     7582    0.007    0.000  150.973    0.020 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/adapters/factor_bridge.py:268(read_daily_frame)
+     7582    0.004    0.000  118.041    0.016 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/adapters/factor_bridge.py:199(read_daily_bars)
+     7582    0.351    0.000  118.037    0.016 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/adapters/factor_bridge.py:225(_read_store_bars)
+     7582    2.694    0.000  117.678    0.016 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/data/market_store.py:489(read_daily_bars)
+ 13348311   13.262    0.000   99.092    0.000 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/data/market_store.py:934(_row_to_bar)
+ 13348311   27.182    0.000   72.511    0.000 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/core/contracts.py:90(__post_init__)
+     7582    0.591    0.000   32.925    0.004 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/adapters/factor_bridge.py:493(_bars_to_frame)
+     7582   11.439    0.002   32.333    0.004 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/adapters/factor_bridge.py:63(bars_to_frame)
+ 53398478   10.392    0.000   28.150    0.000 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/core/contracts.py:43(_require_positive)
+ 80100334   18.320    0.000   26.514    0.000 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/core/fail_loud.py:223(require_finite)
+     7583    0.070    0.000   20.895    0.003 /Users/kongbiao/Downloads/开源量化/Kuantix/.venv/lib/python3.13/site-packages/pandas/core/frame.py:698(__init__)
+     7582    0.104    0.000   19.587    0.003 /Users/kongbiao/Downloads/开源量化/Kuantix/.venv/lib/python3.13/site-packages/pandas/core/internals/construction.py:506(nested_data_to_arrays)
+     7582    0.031    0.000   19.447    0.003 /Users/kongbiao/Downloads/开源量化/Kuantix/.venv/lib/python3.13/site-packages/pandas/core/internals/construction.py:793(to_arrays)
+ 26696622    5.321    0.000   14.074    0.000 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/core/contracts.py:53(_require_non_negative)
+     7582    0.040    0.000   12.409    0.002 /Users/kongbiao/Downloads/开源量化/Kuantix/.venv/lib/python3.13/site-packages/pandas/core/internals/construction.py:928(_finalize_columns_and_data)
+     7582    0.015    0.000   12.357    0.002 /Users/kongbiao/Downloads/开源量化/Kuantix/.venv/lib/python3.13/site-packages/pandas/core/internals/construction.py:1006(convert_object_array)
+    53074    1.355    0.000   12.342    0.000 /Users/kongbiao/Downloads/开源量化/Kuantix/.venv/lib/python3.13/site-packages/pandas/core/internals/construction.py:1028(convert)
+     7583   11.489    0.002   11.489    0.002 {method 'fetchall' of 'sqlite3.Cursor' objects}
+    15174    4.133    0.000   10.951    0.001 /Users/kongbiao/Downloads/开源量化/Kuantix/.venv/lib/python3.13/site-packages/pandas/core/dtypes/cast.py:1166(maybe_infer_to_datetimelike)
+     7582    3.191    0.000    7.000    0.001 /Users/kongbiao/Downloads/开源量化/Kuantix/.venv/lib/python3.13/site-packages/pandas/core/internals/construction.py:891(_list_of_dict_to_arrays)
+    15164    0.075    0.000    6.964    0.000 /Users/kongbiao/Downloads/开源量化/Kuantix/.venv/lib/python3.13/site-packages/pandas/core/arrays/datetimes.py:331(_from_sequence_not_strict)
+     7582    0.020    0.000    6.783    0.001 /Users/kongbiao/Downloads/开源量化/Kuantix/.venv/lib/python3.13/site-packages/pandas/core/indexes/datetimes.py:320(__new__)
+    15164    0.179    0.000    6.693    0.000 /Users/kongbiao/Downloads/开源量化/Kuantix/.venv/lib/python3.13/site-packages/pandas/core/arrays/datetimes.py:2201(_sequence_to_dt64)
+     7582    6.339    0.001    6.342    0.001 /Users/kongbiao/Downloads/开源量化/Kuantix/.venv/lib/python3.13/site-packages/pandas/core/arrays/datetimes.py:2371(objects_to_datetime64)
+ 80100334    4.152    0.000    4.152    0.000 {built-in method math.isnan}
+ 80100334    4.042    0.000    4.042    0.000 {built-in method math.isinf}
+ 13348311    3.806    0.000    3.806    0.000 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/data/market_store.py:98(_date_from_int)
+ 13355893    2.506    0.000    3.323    0.000 /Users/kongbiao/Downloads/开源量化/Kuantix/.venv/lib/python3.13/site-packages/pandas/core/internals/construction.py:915(<genexpr>)
+ 54036420    3.180    0.000    3.180    0.000 {built-in method builtins.getattr}
+    15165    2.376    0.000    2.376    0.000 {method 'execute' of 'sqlite3.Connection' objects}
+    15164    0.009    0.000    2.050    0.000 {built-in method builtins.next}
+    15164    0.033    0.000    2.041    0.000 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/data/market_store.py:142(_connect)
+
+
+
+
+
+================ TOTTIME（自身耗时）================
+
+         448936112 function calls (448839456 primitive calls) in 144.499 seconds
+
+   Ordered by: internal time
+   List reduced from 1043 to 25 due to restriction <25>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+ 13348311   27.182    0.000   72.511    0.000 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/core/contracts.py:90(__post_init__)
+ 80100334   18.320    0.000   26.514    0.000 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/core/fail_loud.py:223(require_finite)
+ 13348311   13.262    0.000   99.092    0.000 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/data/market_store.py:934(_row_to_bar)
+     7583   11.489    0.002   11.489    0.002 {method 'fetchall' of 'sqlite3.Cursor' objects}
+     7582   11.439    0.002   32.333    0.004 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/adapters/factor_bridge.py:63(bars_to_frame)
+ 53398478   10.392    0.000   28.150    0.000 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/core/contracts.py:43(_require_positive)
+     7582    6.339    0.001    6.342    0.001 /Users/kongbiao/Downloads/开源量化/Kuantix/.venv/lib/python3.13/site-packages/pandas/core/arrays/datetimes.py:2371(objects_to_datetime64)
+ 26696622    5.321    0.000   14.074    0.000 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/core/contracts.py:53(_require_non_negative)
+ 80100334    4.152    0.000    4.152    0.000 {built-in method math.isnan}
+    15174    4.133    0.000   10.951    0.001 /Users/kongbiao/Downloads/开源量化/Kuantix/.venv/lib/python3.13/site-packages/pandas/core/dtypes/cast.py:1166(maybe_infer_to_datetimelike)
+ 80100334    4.042    0.000    4.042    0.000 {built-in method math.isinf}
+ 13348311    3.806    0.000    3.806    0.000 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/data/market_store.py:98(_date_from_int)
+     7582    3.191    0.000    7.000    0.001 /Users/kongbiao/Downloads/开源量化/Kuantix/.venv/lib/python3.13/site-packages/pandas/core/internals/construction.py:891(_list_of_dict_to_arrays)
+ 54036420    3.180    0.000    3.180    0.000 {built-in method builtins.getattr}
+     7582    2.694    0.000  117.678    0.016 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/data/market_store.py:489(read_daily_bars)
+ 13355893    2.506    0.000    3.323    0.000 /Users/kongbiao/Downloads/开源量化/Kuantix/.venv/lib/python3.13/site-packages/pandas/core/internals/construction.py:915(<genexpr>)
+    15165    2.376    0.000    2.376    0.000 {method 'execute' of 'sqlite3.Connection' objects}
+    53074    1.355    0.000   12.342    0.000 /Users/kongbiao/Downloads/开源量化/Kuantix/.venv/lib/python3.13/site-packages/pandas/core/internals/construction.py:1028(convert)
+     7582    1.311    0.000    1.311    0.000 {method 'close' of 'sqlite3.Connection' objects}
+ 13348317    0.817    0.000    0.817    0.000 {method 'keys' of 'dict' objects}
+     7582    0.615    0.000  151.617    0.020 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/screen/service.py:546(_safe_frame)
+     7582    0.591    0.000   32.925    0.004 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/adapters/factor_bridge.py:493(_bars_to_frame)
+     7583    0.584    0.000    0.643    0.000 {built-in method _sqlite3.connect}
+     7582    0.351    0.000  118.037    0.016 /Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix/adapters/factor_bridge.py:225(_read_store_bars)
+2064661/2064653    0.262    0.000    0.458    0.000 {built-in method builtins.isinstance}
+
+
+

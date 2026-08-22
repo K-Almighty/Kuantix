@@ -1,0 +1,242 @@
+{
+  "project_root": "/Users/kongbiao/Downloads/开源量化/Kuantix",
+  "package_root": "/Users/kongbiao/Downloads/开源量化/Kuantix/Kuantix",
+  "scopes": {
+    "R0": "元检查 —— 确保红线扫描器本身没有静默失效",
+    "R1": "全包扫描 —— 禁止任何形式的上游系数表副本（NF-25）",
+    "R2": "全包扫描 —— 仅 <pkg>/adapters/ 允许 import easy_tdx（NF-1）",
+    "R3": "全包扫描 —— 上游禁用 API + 禁写 ~/.easy_tdx（NF-1/NF-20）",
+    "R4": "全包扫描 —— 禁 try/except:pass 与 .get(k, 默认值)（NF-26），支持 allowlist 豁免",
+    "R5": "全包扫描 —— 函数定义名 / REST 路由 / 券商 SDK 三维度禁下单（NF-21）",
+    "R6": "业务层扫描（data/factor/screen/monitor/api）—— 禁硬编码 A 股常量，core/ 与 adapters/ 及 *MarketProfile 子类豁免（NF-5）"
+  },
+  "violations": [
+    {
+      "rule": "R4-B",
+      "severity": "FAIL",
+      "file": "Kuantix/core/eventbus.py",
+      "line": 195,
+      "message": "`self._subscribers.get(..., ())` 双参兜底取值（NF-26 禁止静默默认值）。这正是上游 T2 陷阱的成因：查表取不到时给一个'看起来合理'的默认值，错误会一路静默流进因子/回测/选股。整改：改用单参 .get() + 显式判空报错，或 core.fail_loud.require_known()",
+      "code": "targets = list(self._subscribers.get(key, ()))"
+    },
+    {
+      "rule": "R4-B",
+      "severity": "FAIL",
+      "file": "Kuantix/core/eventbus.py",
+      "line": 219,
+      "message": "`self._subscribers.get(..., ())` 双参兜底取值（NF-26 禁止静默默认值）。这正是上游 T2 陷阱的成因：查表取不到时给一个'看起来合理'的默认值，错误会一路静默流进因子/回测/选股。整改：改用单参 .get() + 显式判空报错，或 core.fail_loud.require_known()",
+      "code": "return len(self._subscribers.get(str(topic).strip(), ()))"
+    },
+    {
+      "rule": "R1-E",
+      "severity": "ADVISORY",
+      "file": "spikes/S3_vipdoc_e2e.py",
+      "line": 172,
+      "message": "写盘调用 `sync_daily_bars_from_security_bars(...)` 直接传入字面量系数 (0.01, 0.01)：系数必须由上游表按证券类型查得（NF-25 编解码对称）",
+      "code": "sync_daily_bars_from_security_bars(etf_file, etf_bars, 0.01, 0.01)  # 错误：ETF 应为 0.001"
+    },
+    {
+      "rule": "R4-A",
+      "severity": "ADVISORY",
+      "file": "spikes/S2_throughput.py",
+      "line": 206,
+      "message": "`except Exception: pass` 静默吞异常（NF-26 禁止）。整改：要么向上抛，要么记录异常日志 + 计入隔离区（NF-27），要么用 core.fail_loud 的 require_known/reject_unknown 显式拒绝",
+      "code": "except Exception:  # noqa: BLE001,S110"
+    },
+    {
+      "rule": "R4-A",
+      "severity": "ADVISORY",
+      "file": "spikes/S2_throughput.py",
+      "line": 81,
+      "message": "`except Exception: pass` 静默吞异常（NF-26 禁止）。整改：要么向上抛，要么记录异常日志 + 计入隔离区（NF-27），要么用 core.fail_loud 的 require_known/reject_unknown 显式拒绝",
+      "code": "except Exception:  # noqa: BLE001,S110"
+    },
+    {
+      "rule": "R4-A",
+      "severity": "ADVISORY",
+      "file": "spikes/S2_throughput.py",
+      "line": 76,
+      "message": "`except Exception: pass` 静默吞异常（NF-26 禁止）。整改：要么向上抛，要么记录异常日志 + 计入隔离区（NF-27），要么用 core.fail_loud 的 require_known/reject_unknown 显式拒绝",
+      "code": "except Exception:  # noqa: BLE001,S110"
+    },
+    {
+      "rule": "R4-B",
+      "severity": "ADVISORY",
+      "file": "spikes/S2_throughput.py",
+      "line": 227,
+      "message": "`res.get(..., {})` 双参兜底取值（NF-26 禁止静默默认值）。这正是上游 T2 陷阱的成因：查表取不到时给一个'看起来合理'的默认值，错误会一路静默流进因子/回测/选股。整改：改用单参 .get() + 显式判空报错，或 core.fail_loud.require_known()",
+      "code": "total_a = res.get(\"universe\", {}).get(\"a_share_count\") or 5400"
+    },
+    {
+      "rule": "R4-A",
+      "severity": "ADVISORY",
+      "file": "spikes/S3_vipdoc_e2e.py",
+      "line": 317,
+      "message": "`except Exception: pass` 静默吞异常（NF-26 禁止）。整改：要么向上抛，要么记录异常日志 + 计入隔离区（NF-27），要么用 core.fail_loud 的 require_known/reject_unknown 显式拒绝",
+      "code": "except Exception:  # noqa: BLE001,S110"
+    },
+    {
+      "rule": "R4-A",
+      "severity": "ADVISORY",
+      "file": "spikes/S4_hk_us.py",
+      "line": 89,
+      "message": "`except Exception: pass` 静默吞异常（NF-26 禁止）。整改：要么向上抛，要么记录异常日志 + 计入隔离区（NF-27），要么用 core.fail_loud 的 require_known/reject_unknown 显式拒绝",
+      "code": "except Exception:  # noqa: BLE001,S110"
+    },
+    {
+      "rule": "R4-A",
+      "severity": "ADVISORY",
+      "file": "spikes/S4_hk_us.py",
+      "line": 183,
+      "message": "`except Exception: pass` 静默吞异常（NF-26 禁止）。整改：要么向上抛，要么记录异常日志 + 计入隔离区（NF-27），要么用 core.fail_loud 的 require_known/reject_unknown 显式拒绝",
+      "code": "except Exception:  # noqa: BLE001,S110"
+    },
+    {
+      "rule": "R4-B",
+      "severity": "ADVISORY",
+      "file": "spikes/S4_hk_us.py",
+      "line": 186,
+      "message": "`res.get(..., {})` 双参兜底取值（NF-26 禁止静默默认值）。这正是上游 T2 陷阱的成因：查表取不到时给一个'看起来合理'的默认值，错误会一路静默流进因子/回测/选股。整改：改用单参 .get() + 显式判空报错，或 core.fail_loud.require_known()",
+      "code": "hk_ok = res.get(\"HK\", {}).get(\"status\") == \"available\""
+    },
+    {
+      "rule": "R4-B",
+      "severity": "ADVISORY",
+      "file": "spikes/S4_hk_us.py",
+      "line": 187,
+      "message": "`res.get(..., {})` 双参兜底取值（NF-26 禁止静默默认值）。这正是上游 T2 陷阱的成因：查表取不到时给一个'看起来合理'的默认值，错误会一路静默流进因子/回测/选股。整改：改用单参 .get() + 显式判空报错，或 core.fail_loud.require_known()",
+      "code": "us_ok = res.get(\"US\", {}).get(\"status\") == \"available\""
+    },
+    {
+      "rule": "R4-B",
+      "severity": "ADVISORY",
+      "file": "spikes/S4_hk_us.py",
+      "line": 190,
+      "message": "`res.get(..., {})` 双参兜底取值（NF-26 禁止静默默认值）。这正是上游 T2 陷阱的成因：查表取不到时给一个'看起来合理'的默认值，错误会一路静默流进因子/回测/选股。整改：改用单参 .get() + 显式判空报错，或 core.fail_loud.require_known()",
+      "code": "f\"HK={res.get('HK', {}).get('status')} / US={res.get('US', {}).get('status')}；\""
+    },
+    {
+      "rule": "R4-B",
+      "severity": "ADVISORY",
+      "file": "spikes/S4_hk_us.py",
+      "line": 190,
+      "message": "`res.get(..., {})` 双参兜底取值（NF-26 禁止静默默认值）。这正是上游 T2 陷阱的成因：查表取不到时给一个'看起来合理'的默认值，错误会一路静默流进因子/回测/选股。整改：改用单参 .get() + 显式判空报错，或 core.fail_loud.require_known()",
+      "code": "f\"HK={res.get('HK', {}).get('status')} / US={res.get('US', {}).get('status')}；\""
+    },
+    {
+      "rule": "R4-B",
+      "severity": "ADVISORY",
+      "file": "spikes/S4_hk_us.py",
+      "line": 194,
+      "message": "`res.get(..., {})` 双参兜底取值（NF-26 禁止静默默认值）。这正是上游 T2 陷阱的成因：查表取不到时给一个'看起来合理'的默认值，错误会一路静默流进因子/回测/选股。整改：改用单参 .get() + 显式判空报错，或 core.fail_loud.require_known()",
+      "code": "print(f\"[HK] status={res.get('HK', {}).get('status')} rows={res.get('HK', {}).get('rows')}\")"
+    },
+    {
+      "rule": "R4-B",
+      "severity": "ADVISORY",
+      "file": "spikes/S4_hk_us.py",
+      "line": 194,
+      "message": "`res.get(..., {})` 双参兜底取值（NF-26 禁止静默默认值）。这正是上游 T2 陷阱的成因：查表取不到时给一个'看起来合理'的默认值，错误会一路静默流进因子/回测/选股。整改：改用单参 .get() + 显式判空报错，或 core.fail_loud.require_known()",
+      "code": "print(f\"[HK] status={res.get('HK', {}).get('status')} rows={res.get('HK', {}).get('rows')}\")"
+    },
+    {
+      "rule": "R4-B",
+      "severity": "ADVISORY",
+      "file": "spikes/S4_hk_us.py",
+      "line": 195,
+      "message": "`res.get(..., {})` 双参兜底取值（NF-26 禁止静默默认值）。这正是上游 T2 陷阱的成因：查表取不到时给一个'看起来合理'的默认值，错误会一路静默流进因子/回测/选股。整改：改用单参 .get() + 显式判空报错，或 core.fail_loud.require_known()",
+      "code": "print(f\"[US] status={res.get('US', {}).get('status')} rows={res.get('US', {}).get('rows')}\")"
+    },
+    {
+      "rule": "R4-B",
+      "severity": "ADVISORY",
+      "file": "spikes/S4_hk_us.py",
+      "line": 195,
+      "message": "`res.get(..., {})` 双参兜底取值（NF-26 禁止静默默认值）。这正是上游 T2 陷阱的成因：查表取不到时给一个'看起来合理'的默认值，错误会一路静默流进因子/回测/选股。整改：改用单参 .get() + 显式判空报错，或 core.fail_loud.require_known()",
+      "code": "print(f\"[US] status={res.get('US', {}).get('status')} rows={res.get('US', {}).get('rows')}\")"
+    },
+    {
+      "rule": "R4-B",
+      "severity": "ADVISORY",
+      "file": "spikes/S5_factor_smoke.py",
+      "line": 189,
+      "message": "`res.get(..., {})` 双参兜底取值（NF-26 禁止静默默认值）。这正是上游 T2 陷阱的成因：查表取不到时给一个'看起来合理'的默认值，错误会一路静默流进因子/回测/选股。整改：改用单参 .get() + 显式判空报错，或 core.fail_loud.require_known()",
+      "code": "res.get(k, {}).get(\"ok\") for k in"
+    },
+    {
+      "rule": "R4-B",
+      "severity": "ADVISORY",
+      "file": "spikes/common.py",
+      "line": 34,
+      "message": "`CFG.get(..., '180.153.18.170')` 双参兜底取值（NF-26 禁止静默默认值）。这正是上游 T2 陷阱的成因：查表取不到时给一个'看起来合理'的默认值，错误会一路静默流进因子/回测/选股。整改：改用单参 .get() + 显式判空报错，或 core.fail_loud.require_known()",
+      "code": "BEST_HOST = CFG.get(\"best_host\", \"180.153.18.170\")"
+    },
+    {
+      "rule": "R4-B",
+      "severity": "ADVISORY",
+      "file": "spikes/common.py",
+      "line": 35,
+      "message": "`CFG.get(..., '123.60.47.136')` 双参兜底取值（NF-26 禁止静默默认值）。这正是上游 T2 陷阱的成因：查表取不到时给一个'看起来合理'的默认值，错误会一路静默流进因子/回测/选股。整改：改用单参 .get() + 显式判空报错，或 core.fail_loud.require_known()",
+      "code": "BEST_MAC_HOST = CFG.get(\"best_mac_host\", \"123.60.47.136\")"
+    },
+    {
+      "rule": "R4-B",
+      "severity": "ADVISORY",
+      "file": "spikes/common.py",
+      "line": 37,
+      "message": "`CFG.get(..., [])` 双参兜底取值（NF-26 禁止静默默认值）。这正是上游 T2 陷阱的成因：查表取不到时给一个'看起来合理'的默认值，错误会一路静默流进因子/回测/选股。整改：改用单参 .get() + 显式判空报错，或 core.fail_loud.require_known()",
+      "code": "KNOWN_HOSTS = CFG.get(\"known_hosts\", [])"
+    },
+    {
+      "rule": "R4-B",
+      "severity": "ADVISORY",
+      "file": "spikes/common.py",
+      "line": 38,
+      "message": "`CFG.get(..., [])` 双参兜底取值（NF-26 禁止静默默认值）。这正是上游 T2 陷阱的成因：查表取不到时给一个'看起来合理'的默认值，错误会一路静默流进因子/回测/选股。整改：改用单参 .get() + 显式判空报错，或 core.fail_loud.require_known()",
+      "code": "MAC_HOSTS = CFG.get(\"mac_hosts\", [])"
+    },
+    {
+      "rule": "R4-B",
+      "severity": "ADVISORY",
+      "file": "spikes/common.py",
+      "line": 40,
+      "message": "`CFG.get(..., ['116.205.135.205', '121.37.232.167'])` 双参兜底取值（NF-26 禁止静默默认值）。这正是上游 T2 陷阱的成因：查表取不到时给一个'看起来合理'的默认值，错误会一路静默流进因子/回测/选股。整改：改用单参 .get() + 显式判空报错，或 core.fail_loud.require_known()",
+      "code": "MAC_EX_HOSTS = CFG.get(\"mac_ex_hosts\", [\"116.205.135.205\", \"121.37.232.167\"])"
+    },
+    {
+      "rule": "R4-B",
+      "severity": "ADVISORY",
+      "file": "spikes/common.py",
+      "line": 41,
+      "message": "`CFG.get(..., [])` 双参兜底取值（NF-26 禁止静默默认值）。这正是上游 T2 陷阱的成因：查表取不到时给一个'看起来合理'的默认值，错误会一路静默流进因子/回测/选股。整改：改用单参 .get() + 显式判空报错，或 core.fail_loud.require_known()",
+      "code": "EX_HOSTS = CFG.get(\"ex_hosts\", [])"
+    },
+    {
+      "rule": "R4-B",
+      "severity": "ADVISORY",
+      "file": "spikes/common.py",
+      "line": 36,
+      "message": "`CFG.get(..., 7709)` 双参兜底取值（NF-26 禁止静默默认值）。这正是上游 T2 陷阱的成因：查表取不到时给一个'看起来合理'的默认值，错误会一路静默流进因子/回测/选股。整改：改用单参 .get() + 显式判空报错，或 core.fail_loud.require_known()",
+      "code": "PORT = int(CFG.get(\"port\", 7709))"
+    }
+  ],
+  "allowlists": {
+    "selftest": [
+      {
+        "pattern": "Kuantix/config.py",
+        "line": 42,
+        "reason": "配置项缺省值来自 config.toml 模板，不承载业务语义",
+        "used": true
+      },
+      {
+        "pattern": "Kuantix/api/routers/*.py",
+        "line": null,
+        "reason": "整文件豁免样例，理由要写清楚",
+        "used": true
+      }
+    ],
+    "R4 fail-loud": [],
+    "R5 无下单接口": [],
+    "R6 硬编码 A 股常量": []
+  }
+}

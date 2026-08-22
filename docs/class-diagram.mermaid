@@ -1,0 +1,265 @@
+classDiagram
+    %% ============ CORE 层 ============
+    class Envelope {
+        +int code
+        +str message
+        +Any data
+        +Meta meta
+    }
+    class Meta {
+        +datetime generated_at
+        +str data_date
+        +str market
+        +int elapsed_ms
+        +str version
+    }
+    class FailLoud {
+        <<static>>
+        +require_known(value, context)*T
+        +reject_unknown(value, context)$void
+    }
+    class MarketProfile {
+        <<abstract>>
+        +str market
+        +str currency
+        +str timezone
+        +float price_limit
+        +float tick_size
+        +int lot_size
+        +int trading_days_per_year
+        +is_trading_day(date) bool
+        +session_now() Session
+    }
+    class CNMarketProfile {
+        +is_trading_day(date) bool
+    }
+    class HKMarketProfile {
+        +is_trading_day(date) bool
+        +note P1：未实现显式抛错
+    }
+    class USMarketProfile {
+        +is_trading_day(date) bool
+        +note P1：未实现显式抛错
+    }
+    class PluginRegistry {
+        +register(kind, cls)
+        +resolve(kind, name) Type
+        +all(kind) list
+    }
+    class EventBus {
+        +subscribe(topic, cb)
+        +publish(topic, event)
+    }
+    class Security {
+        +str code
+        +str exchange
+        +str type
+        +str name
+    }
+
+    Envelope *-- Meta
+    MarketProfile <|-- CNMarketProfile
+    MarketProfile <|-- HKMarketProfile
+    MarketProfile <|-- USMarketProfile
+
+    %% ============ ADAPTERS 层（唯一触碰 easy_tdx 之处）============
+    class TdxClientFactory {
+        +get_mac_client() MacClient
+        +get_mac_ex_client() MacExClient
+        +get_tdx_client() TdxClient
+        -pool: dict
+    }
+    class UniverseEnumerator {
+        +enumerate() list~Security~
+        -note 每页新建 TdxClient（RD-10）
+    }
+    class QuotationFetcher {
+        +fetch_kline(market, code, years) list~Bar~
+        -note A股 MacClient / 港美股 MacExClient
+        -note vol 股→手 ÷100（RD-8）
+    }
+    class CoefficientResolver {
+        +detect_coeff(filename) tuple
+        -note import 上游 _SECURITY_COEFFICIENTS（NF-25）
+    }
+    class VipdocWriter {
+        +write_daily(bars, path) int
+        +write_ex_daily(bars, path) int
+        -note 系数按文件名判定（T1）
+        -note vol÷100（RD-8）
+        -note uint32 上界校验（RD-9）
+        -note ex/min 自补 fsync+回读（RD-2/NF-27）
+    }
+    class Bar {
+        +int date
+        +float open
+        +float high
+        +float low
+        +float close
+        +int vol
+        +float amount
+    }
+
+    TdxClientFactory ..> QuotationFetcher : creates
+    CoefficientResolver ..> VipdocWriter : supplies coeff
+    QuotationFetcher ..> Bar : returns
+    VipdocWriter ..> Bar : consumes
+
+    %% ============ DATA 层 ============
+    class DataLake {
+        +sync_full(market, years, workers) SyncHandle
+        +sync_incremental() SyncHandle
+        +verify() VerifyReport
+    }
+    class SyncEngine {
+        +progress: Progress
+        +resume(handle) void
+        +run_background(handle) void
+        -note 断点续传 + 限速退避（NF-24）
+    }
+    class QuarantineStore {
+        +add(entry) void
+        +list() list~QuarantineEntry~
+        +remove(code) void
+    }
+    class QuarantineEntry {
+        +str code
+        +str reason
+        +datetime occurred_at
+        +datetime last_try
+    }
+    class VerifyReport {
+        +dict coverage
+        +list missing_days
+        +list corrupt
+        +list quarantined
+    }
+
+    DataLake --> UniverseEnumerator
+    DataLake --> QuotationFetcher
+    DataLake --> VipdocWriter
+    DataLake --> SyncEngine
+    DataLake --> QuarantineStore
+    SyncEngine ..> QuarantineStore : on failure
+    VerifyReport *-- QuarantineEntry
+
+    %% ============ FACTOR 层 ============
+    class FactorStore {
+        +compute(pool, range, factors) void
+        +save(factor, year) void
+        +load(factor, date, code) DataFrame
+        -note Parquet 分区 + SQLite 元数据
+    }
+    class FactorService {
+        +compute_factors(req) JobResult
+        +report(factor) FactorReport
+        +combine(req) ModelHandle
+    }
+    class FactorCombiner {
+        +combine(values, method) Series
+        -note equal / ic / ir 加权
+    }
+    class ModelHandle {
+        +str name
+        +dict weights
+    }
+
+    FactorService --> FactorStore
+    FactorService --> FactorCombiner
+    FactorService ..> QuotationFetcher : read L1
+
+    %% ============ SCREEN 层 ============
+    class ScreenService {
+        +run(req) list~ScreenResult~
+    }
+    class ScreenFilter {
+        +tech_filter(df, cond) bool
+        +chanlun_filter(df, cond) bool
+    }
+    class ScreenResult {
+        +str code
+        +str name
+        +float score
+        +dict sub_scores
+        +str conditions
+        +float price
+    }
+
+    ScreenService --> FactorStore
+    ScreenService --> ScreenFilter
+    ScreenService ..> QuotationFetcher : read L1
+
+    %% ============ MONITOR 层 ============
+    class QuoteFeed {
+        +poll(codes) list~Quote~
+        -note 仅交易时段（MarketProfile）
+    }
+    class PositionTracker {
+        +add_position(p) void
+        +pnl() dict
+    }
+    class RuleEngine {
+        +evaluate(quote, rules) list~Alert~
+        +register_criterion(cls) void
+    }
+    class Notifier {
+        +send(alert) bool
+        -channels: list~NotifyChannel~
+    }
+    class NotifyChannel {
+        <<abstract plugin>>
+        +send(alert) bool
+    }
+    class DesktopChannel {
+        +send(alert) bool
+    }
+    class WebhookChannel {
+        +send(alert) bool
+    }
+    class Alert {
+        +str id
+        +str code
+        +str rule
+        +str level
+        +str message
+        +datetime ts
+    }
+    class Quote {
+        +str code
+        +float last
+        +float change_pct
+    }
+
+    MonitorLoop <|-- EventBus
+    Notifier *-- NotifyChannel
+    NotifyChannel <|-- DesktopChannel
+    NotifyChannel <|-- WebhookChannel
+    RuleEngine ..> Alert : produces
+    Notifier ..> Alert : consumes
+    QuoteFeed ..> Quote : returns
+
+    %% ============ API 层 ============
+    class APIServer {
+        +create_app() FastAPI
+    }
+    class CLIRunner {
+        +invoke(args) Envelope
+        -note --json 双入口（NF-10）
+    }
+
+    APIServer ..> DataLake : routes
+    APIServer ..> FactorService : routes
+    APIServer ..> ScreenService : routes
+    APIServer ..> MonitorLoop : routes
+    CLIRunner ..> DataLake
+    CLIRunner ..> FactorService
+    CLIRunner ..> ScreenService
+    CLIRunner ..> MonitorLoop
+
+    %% ============ 跨层契约 ============
+    MarketProfile <.. DataLake : 取规则
+    MarketProfile <.. QuoteFeed : 取时段
+    FailLoud <.. VipdocWriter : 拒绝 UNKNOWN
+    FailLoud <.. RuleEngine : 拒绝缺失
+    PluginRegistry <.. Notifier : 插件发现
+    PluginRegistry <.. RuleEngine : 判据插件

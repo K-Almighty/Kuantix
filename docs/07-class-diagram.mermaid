@@ -1,0 +1,104 @@
+classDiagram
+    direction LR
+
+    class BacktestRunRequest {
+        +str market
+        +tuple codes
+        +str strategy
+        +dict params
+        +date start
+        +date end
+        +float cash
+        +float commission
+        +float min_commission
+        +float stamp_tax
+        +float slippage
+        +str execution
+        +str data_source  # v1.4: auto | local | live
+    }
+
+    class BacktestService {
+        -L1Reader _reader
+        -QuotationFetcher|None _fetcher
+        -BacktestBridge _bridge
+        -BacktestResultStore _store
+        +run(job_id, req, progress_cb) BacktestRunResult
+        +get_result(job_id) dict|None
+        +get_kline_with_signals(code, market, start, end, strategy, data_source) dict
+        -_load_frame(profile, code, req) DataFrame
+        -_read_frame(profile, code, start, end, data_source) DataFrame
+        -_get_fetcher() QuotationFetcher
+        -_run_one(frame, req) dict
+        -_combine(per_code, req) dict
+    }
+
+    class QuotationFetcher {
+        +fetch_kline(market, code, years, *, exchange, count, adjust) list[Bar]
+        +fetch_quotes(market, codes) list[Quote]
+    }
+
+    class L1Reader {
+        +read_daily_bars(exchange, code) list[Bar]
+        +read_daily_frame(exchange, code) DataFrame
+        +day_path(exchange, code) Path
+    }
+
+    class data_source {
+        <<module>>
+        +local_has_data(reader, profile, code) bool
+        +fetch_live_frame(fetcher, profile, code, start, end) DataFrame
+        +_live_years_for(start, end) int
+    }
+
+    class SyncStateStore {
+        -Path _path
+        +load() dict|None
+        +update(*, at, status, trigger, error, result, reason) dict
+        +last_sync_date() date|None
+    }
+
+    class IncrementalSyncScheduler {
+        -Config _config
+        -DataLake _lake
+        -SyncStateStore _state
+        -BackgroundScheduler _scheduler
+        -bool _started
+        +start() void
+        +stop() void
+        +run_once(trigger) dict
+        +status() dict
+        -_cron_job() void
+        -_startup_check() void
+        -_dispatch(trigger) void
+        -_should_run(trigger) str|None
+        -_acquire_lock() bool
+    }
+
+    class DataLake {
+        +status(market) dict
+        +sync_full(market, years, *, workers, checkpoint_path, force) SyncHandle
+        +sync_incremental(market, *, workers, checkpoint_path, force) SyncHandle
+        +verify(market) VerifyReport
+    }
+
+    class SyncConfig {
+        +int workers
+        +int default_years
+        +float min_request_interval
+        +float retry_backoff_seconds
+        +int retry_max_attempts
+        +bool schedule_enabled
+        +str schedule_time
+        +bool schedule_startup_check
+    }
+
+    BacktestService --> L1Reader : 读本地（local / auto-本地）
+    BacktestService --> QuotationFetcher : 实时（live / auto-回退）
+    BacktestService --> data_source : 分支工具
+    data_source --> L1Reader : 存在性探测
+    data_source --> QuotationFetcher : 实时拉取
+    IncrementalSyncScheduler --> DataLake : 触发增量
+    IncrementalSyncScheduler --> SyncStateStore : 记录状态
+    DataLake --> SyncStateStore : 读 last_sync
+    IncrementalSyncScheduler ..> SyncConfig : 读取调度配置
+    DataLake ..> SyncConfig : 读 schedule 视图
