@@ -30,6 +30,26 @@ export interface StockIndicators {
   rsi?: { rsi6: (number | null)[]; rsi12: (number | null)[]; rsi24: (number | null)[] };
 }
 
+/** 最新交易日行情快照（与请求周期无关，顶部报价区专用） */
+export interface StockQuote {
+  /** 最新交易日（YYYY-MM-DD） */
+  date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  /** 上一交易日收盘价 */
+  prev_close: number;
+  /** 涨跌额（close - prev_close） */
+  change: number;
+  /** 涨跌幅（小数比例，如 -0.0123 = -1.23%；prev_close 为 0 时为 null） */
+  change_pct: number | null;
+  vol: number;
+  amount: number;
+  /** 换手率（小数比例）；无流通股本时为 0 */
+  turnover: number;
+}
+
 /** 个股详情信封数据 */
 export interface StockDetail {
   code: string;
@@ -45,6 +65,8 @@ export interface StockDetail {
   data_source?: 'lake' | 'tdx_realtime';
   /** 换手率是否为估算值（无流通股本时退化为相对量） */
   turnover_estimated: boolean;
+  /** 最新交易日行情快照（任何周期都返回日口径；不可得时为 null） */
+  quote?: StockQuote | null;
   bars: StockBar[];
   indicators: StockIndicators;
   /** 分钟线无数据时的提示 */

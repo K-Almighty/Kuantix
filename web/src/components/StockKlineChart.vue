@@ -18,6 +18,8 @@ const props = withDefaults(
     bars: StockBar[];
     indicators?: StockIndicators;
     height?: string;
+    /** 当前周期键（day/week/month/year/min5/min15/min60）：决定时间轴标签粒度 */
+    period?: string;
     showVolume?: boolean;
     showMa?: boolean;
     showMacd?: boolean;
@@ -29,6 +31,7 @@ const props = withDefaults(
   {
     indicators: () => ({}),
     height: '560px',
+    period: 'day',
     showVolume: true,
     showMa: true,
     showMacd: true,
@@ -49,6 +52,8 @@ const DEFAULT_SPAN = 250;
 const zoomStart = computed(() => {
   const n = props.bars.length;
   if (n <= MIN_FULL) return 0;
+  // 分钟/分时周期：短窗口数据默认全量展示（通达信分时习惯）
+  if (props.bars[n - 1]?.datetime.includes(' ')) return 0;
   return Math.max(0, ((n - DEFAULT_SPAN) / n) * 100);
 });
 
@@ -88,21 +93,56 @@ const layout = computed(() => {
   if (props.showKdj) subPanels.push('kdj');
   if (props.showRsi) subPanels.push('rsi');
 
+  // 底部预留 13%：最底副图时间轴标签（~16px）+ 安全间距 + 缩放滑块（18px），
+  // 避免两者互相遮挡导致时间标签展示不全
   const grids: Array<Record<string, unknown>> = [
-    { left: 56, right: 16, top: 28, height: '46%' },
+    { left: 56, right: 16, top: 26, height: '40%' },
   ];
   const n = subPanels.length;
   if (n > 0) {
-    const total = 100;
-    const mainEnd = 46 + 2;
-    const gap = 2;
-    const each = (total - mainEnd - gap * (n - 1) - 4) / n;
+    const areaTop = 68;
+    const areaBottom = 87;
+    const gap = 1.5;
+    const each = (areaBottom - areaTop - gap * (n - 1)) / n;
     subPanels.forEach((_, idx) => {
-      const top = mainEnd + (each + gap) * idx + 2;
+      const top = areaTop + (each + gap) * idx;
       grids.push({ left: 56, right: 16, top: `${top}%`, height: `${each}%` });
     });
   }
   return { subPanels, grids };
+});
+
+/**
+ * 时间轴短标签（按周期粒度，避免"年K全是 12-31"这类无信息量标签）：
+ * - 年K：显示 YYYY（每根 K 即一年）；
+ * - 月K：显示 YYYY-MM；
+ * - 日/周K：常规显示 MM-DD，跨年首根显示 YYYY-MM（年份锚点）；
+ * - 分钟周期：同日显示 HH:MM，跨日首根显示 MM-DD（日界锚点）。
+ */
+const axisLabels = computed(() => {
+  if (props.period === 'year') {
+    return dates.value.map((d) => d.slice(0, 4));
+  }
+  if (props.period === 'month') {
+    return dates.value.map((d) => d.slice(0, 7));
+  }
+  const out: string[] = [];
+  let lastDay = '';
+  let lastYear = '';
+  for (const dt of dates.value) {
+    const day = dt.slice(0, 10);
+    const year = dt.slice(0, 4);
+    if (dt.includes(' ')) {
+      out.push(day !== lastDay ? dt.slice(5, 10) : dt.slice(11, 16));
+    } else if (props.period === 'day' || props.period === 'week') {
+      out.push(year !== lastYear ? dt.slice(0, 7) : dt.slice(5, 10));
+    } else {
+      out.push(dt.slice(5, 10));
+    }
+    lastDay = day;
+    lastYear = year;
+  }
+  return out;
 });
 
 const option = computed<EChartsCoreOption>(() => {
@@ -201,13 +241,20 @@ const option = computed<EChartsCoreOption>(() => {
       data: dates.value,
       gridIndex: gi,
       boundaryGap: true,
-      axisLabel: { show: panel === subPanels[subPanels.length - 1] },
+      axisLabel: {
+        show: panel === subPanels[subPanels.length - 1],
+        // 重叠标签自动隐藏（分钟周期 1200 根时保证时间轴可读）
+        hideOverlap: true,
+        formatter: (_v: string, idx: number) => axisLabels.value[idx] ?? '',
+      },
     });
     yAxes.push({
       type: 'value',
       gridIndex: gi,
       splitLine: { show: false },
       scale: true,
+      // 大数缩写（年K成交量上亿手，全数字刻度会重叠成"000,000"）
+      axisLabel: { formatter: (v: number) => fmtBig(v, 1) },
     });
     gridIdx += 1;
   }

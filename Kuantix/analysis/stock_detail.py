@@ -129,6 +129,28 @@ class StockDetailService:
             self._tdx_fetcher = QuotationFetcher(TdxClientFactory.from_config(self._cfg))
         return self._tdx_fetcher.fetch_kline(market, code, count=count)
 
+    def _fetch_tdx_minute_bars(
+        self, market: str, code: str, period: str, count: int
+    ) -> list[Any]:
+        """经 QuotationFetcher 从 tdx 实时拉分钟线；失败抛原始异常由调用方处理。
+
+        ``period`` 为详情页周期键（min5/min15/min60）：min5 拉 1 分钟线
+        （分时），min15/min60 直接拉对应周期档（无需本地聚合）。
+        """
+        if self._tdx_fetcher is None:
+            from Kuantix.adapters.quotation import QuotationFetcher
+            from Kuantix.adapters.tdx_client import TdxClientFactory
+
+            if self._cfg is None:
+                raise DataIntegrityError(
+                    "[fail-loud] StockDetailService 未注入 config，无法回退 tdx 分钟行情"
+                )
+            self._tdx_fetcher = QuotationFetcher(TdxClientFactory.from_config(self._cfg))
+        minutes = {"min5": 1, "min15": 15, "min60": 60}[period]
+        return self._tdx_fetcher.fetch_minute_kline(
+            market, code, period_minutes=minutes, count=count
+        )
+
     def _security_name(self, market: str, code: str) -> str:
         """取证券名称（lake 元信息；缺失返回空串，前端兜底显示代码）。"""
         try:
@@ -136,6 +158,56 @@ class StockDetailService:
             return str(name or "").strip()
         except Exception:  # noqa: BLE001 - 名称缺失不影响行情展示
             return ""
+
+    def _daily_quote(
+        self, market: str, code: str, daily_bars: Sequence[Any] | None = None
+    ) -> dict[str, Any] | None:
+        """最新交易日行情快照（与请求周期无关，供前端顶部报价区展示）。
+
+        周/月/年K的最后一根是跨期聚合值（昨收=上期收盘、涨跌=跨期对比），
+        直接当日内行情展示会出现「单日 -27%」这类误导数字；顶部行情必须
+        始终是最新交易日口径。日线序列优先复用调用方已取数据；不足时本地
+        读尾 120 根（同时探测残缺），本地残缺（<120 根，market.db 未同步
+        时的测试残留）再 tdx 回退；均不可得返回 None（前端退化为旧逻辑）。
+        """
+        bars: list[Any] = list(daily_bars) if daily_bars is not None else []
+        if len(bars) < 2:
+            try:
+                # tail=120：取 quote 候选的同时探测本地是否残缺（<120 根
+                # 说明 market.db 未同步，可能是测试残留假数据）
+                bars = list(self._store.read_daily_bars(market, code, tail=120))
+            except Exception:  # noqa: BLE001 - quote 缺失不影响 K 线展示
+                bars = []
+            if len(bars) < 120:
+                try:
+                    tdx_bars = list(self._fetch_tdx_bars(market, code, count=5))
+                except Exception:  # noqa: BLE001
+                    tdx_bars = []
+                # 本地残缺时 tdx 更可信（与日线回退同策略：多者胜出）
+                if len(tdx_bars) > len(bars):
+                    bars = tdx_bars
+        if len(bars) < 2:
+            return None
+        last, prev = bars[-1], bars[-2]
+        close, prev_close = float(last.close), float(prev.close)
+        float_shares = self._free_float_shares(market, code)
+        return {
+            "date": last.date.isoformat(),
+            "open": float(last.open),
+            "high": float(last.high),
+            "low": float(last.low),
+            "close": close,
+            "prev_close": prev_close,
+            "change": round(close - prev_close, 6),
+            "change_pct": round((close - prev_close) / prev_close, 6)
+            if prev_close
+            else None,
+            "vol": float(last.vol),
+            "amount": float(last.amount),
+            "turnover": round(float(last.vol) / float_shares, 6)
+            if float_shares
+            else 0.0,
+        }
 
     def _listing_date(self, market: str, code: str) -> str | None:
         """取上市日期（lake 日线首根日期；缺失返回 None，前端按默认区间处理）。
@@ -219,24 +291,29 @@ class StockDetailService:
         else:
             bars = self._store.read_daily_bars(market, code)
         data_source = "lake"
-        if not bars:
-            # 本地无日线 → 回退 tdx 实时拉取（顶部搜索任意代码可进详情页），
-            # 成功则正常展示并标注来源；仍拿不到才 fail-loud。
-            fetch_count = max(int(limit), 120)
+        # 本地数据不足（market.db 未全量同步）→ tdx 回退拉深历史：
+        # day 需 limit+80 根（指标预热）；周/月/年重采样需足够历史
+        # （120 根 ≈ 半年，否则年K仅 1 根、指标全空）。
+        # tdx 比本地更全则采用并标注来源；不足时沿用本地（少好于无）。
+        min_needed = int(limit) + 80 if period == "day" else 120
+        if len(bars) < min_needed:
             try:
-                tdx_bars = self._fetch_tdx_bars(market, code, count=fetch_count)
-            except Exception as exc:  # noqa: BLE001 - 回退失败回到原报错
-                raise DataIntegrityError(
-                    f"[fail-loud] {code} 无日线数据（market.db 未同步），"
-                    f"且 tdx 实时回退失败：{exc}"
-                ) from exc
-            if not tdx_bars:
+                tdx_bars = self._fetch_tdx_bars(market, code, count=5000)
+            except Exception as exc:  # noqa: BLE001 - 本地有数据时容忍回退失败
+                if not bars:
+                    raise DataIntegrityError(
+                        f"[fail-loud] {code} 无日线数据（market.db 未同步），"
+                        f"且 tdx 实时回退失败：{exc}"
+                    ) from exc
+                tdx_bars = []
+            if len(tdx_bars) > len(bars):
+                bars = tdx_bars
+                data_source = "tdx_realtime"
+            elif not bars and not tdx_bars:
                 raise DataIntegrityError(
                     f"[fail-loud] {code} 无日线数据（market.db 未同步，"
                     "tdx 实时亦无返回——请确认代码是否有效）"
                 )
-            bars = tdx_bars
-            data_source = "tdx_realtime"
         frame = self._bars_to_frame(bars)
         # 防御上游重复写入（同一 date 多条相同记录），按日期去重保留末值
         frame = frame.drop_duplicates(subset=["datetime"], keep="last").reset_index(drop=True)
@@ -253,10 +330,18 @@ class StockDetailService:
             rs = rs.tail(limit)
         rs = rs.reset_index(drop=True)
         out_bars = self._frame_to_bars(rs, market, code)
-        listing_date = self._listing_date(market, code)
+        if data_source == "tdx_realtime":
+            # tdx 深历史比本地元信息可信：上市日期取回退数据首根
+            # （本地 lake 未同步时 first_daily_date 同样残缺）
+            listing_date = bars[0].date.isoformat()
+        else:
+            listing_date = self._listing_date(market, code)
+        # 顶部行情快照取自日线原始序列（bars 即日线，非重采样结果）
+        quote = self._daily_quote(market, code, daily_bars=bars)
         return self._assemble(
             code, market, period, out_bars, indicators,
             available=True, data_source=data_source, listing_date=listing_date,
+            quote=quote,
         )
 
     # ------------------------------------------------------------------ #
@@ -293,20 +378,35 @@ class StockDetailService:
                 market, code, start_date=start
             )
 
+        data_source = "lake"
         if not rows:
-            # 本地无分钟数据：明确标记，前端提示，不编造
-            listing_date = self._listing_date(market, code)
-            return {
-                "code": code,
-                "market": market,
-                "period": period,
-                "available": False,
-                "turnover_estimated": False,
-                "listing_date": listing_date,
-                "bars": [],
-                "indicators": {i: {} for i in indicators},
-                "message": "本地无分钟级数据，请先执行 data sync --minute",
-            }
+            # 本地无分钟数据 → tdx 实时回退（与日线回退同策略：拉到就正常
+            # 展示并标注来源；拉不到才标记 unavailable，绝不编造）。
+            # min5 拉 1200 根 1 分钟（≈5 个交易日）；min15/min60 直接拉
+            # 对应周期档（60 天窗口），无需再走本地聚合。
+            counts = {"min5": 1200, "min15": 960, "min60": 240}
+            try:
+                tdx_rows = self._fetch_tdx_minute_bars(
+                    market, code, period, counts[period]
+                )
+            except Exception as exc:  # noqa: BLE001 - 回退失败 → 显式 unavailable
+                return self._minute_unavailable(
+                    code, market, period, indicators,
+                    message=(
+                        "本地无分钟级数据（market.db 未同步），"
+                        f"tdx 实时回退失败：{exc}"
+                    ),
+                )
+            if not tdx_rows:
+                return self._minute_unavailable(
+                    code, market, period, indicators,
+                    message=(
+                        "本地无分钟级数据（market.db 未同步，"
+                        "tdx 实时亦无返回——请确认代码是否有效）"
+                    ),
+                )
+            rows = tdx_rows
+            data_source = "tdx_realtime"
 
         frame = self._minute_to_frame(rows)
         if limit and len(frame) > limit:
@@ -314,10 +414,34 @@ class StockDetailService:
         frame = frame.reset_index(drop=True)
         out_bars = self._frame_to_bars(frame, market, code)
         listing_date = self._listing_date(market, code)
+        quote = self._daily_quote(market, code)
         return self._assemble(
             code, market, period, out_bars, indicators, available=True,
-            listing_date=listing_date,
+            data_source=data_source, listing_date=listing_date, quote=quote,
         )
+
+    def _minute_unavailable(
+        self,
+        code: str,
+        market: str,
+        period: str,
+        indicators: Sequence[str],
+        *,
+        message: str,
+    ) -> dict[str, Any]:
+        """构造分钟周期「无数据」响应（available=False + 提示，不编造）。"""
+        return {
+            "code": code,
+            "market": market,
+            "period": period,
+            "available": False,
+            "turnover_estimated": False,
+            "listing_date": self._listing_date(market, code),
+            "bars": [],
+            "indicators": {i: {} for i in indicators},
+            "quote": self._daily_quote(market, code),
+            "message": message,
+        }
 
     # ------------------------------------------------------------------ #
     # 内部工具
@@ -332,6 +456,7 @@ class StockDetailService:
         available: bool,
         data_source: str = "lake",
         listing_date: str | None = None,
+        quote: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         closes = [b["close"] for b in bars]
         highs = [b["high"] for b in bars]
@@ -372,6 +497,7 @@ class StockDetailService:
             "data_source": data_source,
             "turnover_estimated": turnover_estimated,
             "listing_date": listing_date,
+            "quote": quote,
             "bars": bars,
             "indicators": ind,
         }

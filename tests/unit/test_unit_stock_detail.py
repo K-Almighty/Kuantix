@@ -241,7 +241,7 @@ class TestGetDetailDaily:
         assert len(payload["bars"]) > 0
 
     def test_minute_period_without_data_marks_unavailable(self):
-        """本地无分钟数据：available=False + 提示，不编造数据。"""
+        """本地无分钟数据且 tdx 回退不可用：available=False + 提示，不编造数据。"""
         store = FakeStore(_make_bars(10))
         store.read_minute_bars = lambda *a, **k: []  # type: ignore[method-assign]
         svc = StockDetailService(store=store, config=None)
@@ -249,3 +249,285 @@ class TestGetDetailDaily:
         assert payload["available"] is False
         assert payload["bars"] == []
         assert "分钟" in payload["message"]
+
+
+# --------------------------------------------------------------------- #
+# 分钟周期 tdx 实时回退（本地 db/minute 为空时的数据来源）
+# --------------------------------------------------------------------- #
+def _tdx_minute_rows(n: int, *, period_minutes: int) -> list[MinuteBar]:
+    """构造 tdx 分钟线替身：每天 240/16/4 根（按周期档），连续自然日。"""
+    per_day = 240 // period_minutes
+    days = (n + per_day - 1) // per_day
+    base = dt.date(2026, 6, 1)
+    rows: list[MinuteBar] = []
+    for d in range(days):
+        date = int((base + dt.timedelta(days=d)).strftime("%Y%m%d"))
+        for k in range(per_day):
+            minute_of_day = 9 * 60 + 30 + k * period_minutes
+            hh, mm = divmod(minute_of_day, 60)
+            rows.append(
+                MinuteBar(
+                    market="CN",
+                    code="600000",
+                    date=date,
+                    time=hh * 100 + mm,
+                    open=10.0,
+                    high=11.0,
+                    low=9.0,
+                    close=10.5,
+                    vol=100.0,
+                    amount=1000.0,
+                )
+            )
+    return rows
+
+
+class FakeTdxMinuteFetcher:
+    """tdx 分钟拉取替身：记录调用参数，返回预置分钟线。"""
+
+    def __init__(self, rows: list[MinuteBar]) -> None:
+        self.rows = rows
+        self.calls: list[tuple[str, int, int]] = []
+
+    def fetch_minute_kline(self, market, code, *, period_minutes, count):
+        self.calls.append((market, period_minutes, count))
+        return self.rows
+
+
+class TestMinuteTdxFallback:
+    def _svc(self, fetcher: FakeTdxMinuteFetcher) -> StockDetailService:
+        store = FakeStore(_make_bars(10))
+        store.read_minute_bars = lambda *a, **k: []  # type: ignore[method-assign]
+        svc = StockDetailService(store=store, config=None)
+        svc._tdx_fetcher = fetcher  # type: ignore[assignment]  # 注入替身跳过真实网络
+        return svc
+
+    def test_min15_falls_back_to_tdx(self):
+        """本地无 15 分钟数据 → tdx 拉 15 分钟档（960 根），标注 tdx_realtime。"""
+        fetcher = FakeTdxMinuteFetcher(_tdx_minute_rows(960, period_minutes=15))
+        payload = self._svc(fetcher).get_detail("600000", period="min15", limit=500)
+        assert fetcher.calls == [("CN", 15, 960)]
+        assert payload["available"] is True
+        assert payload["data_source"] == "tdx_realtime"
+        assert len(payload["bars"]) == 500  # limit 截尾
+        # 分钟线 datetime 带时间部分（YYYY-MM-DD HH:MM）
+        assert " " in payload["bars"][0]["datetime"]
+        assert payload["bars"][0]["datetime"].endswith("12:30")  # 960-500=460 → 第29天第12根
+
+    def test_min60_falls_back_to_tdx(self):
+        """本地无 60 分钟数据 → tdx 拉 60 分钟档（240 根）。"""
+        fetcher = FakeTdxMinuteFetcher(_tdx_minute_rows(240, period_minutes=60))
+        payload = self._svc(fetcher).get_detail("600000", period="min60", limit=500)
+        assert fetcher.calls == [("CN", 60, 240)]
+        assert payload["available"] is True
+        assert payload["data_source"] == "tdx_realtime"
+        assert len(payload["bars"]) == 240  # 不足 limit 不补
+
+    def test_min5_falls_back_to_tdx_one_minute(self):
+        """分时（min5）→ tdx 拉 1 分钟档（1200 根 = 5 个交易日）。"""
+        fetcher = FakeTdxMinuteFetcher(_tdx_minute_rows(1200, period_minutes=1))
+        payload = self._svc(fetcher).get_detail("600000", period="min5", limit=1500)
+        assert fetcher.calls == [("CN", 1, 1200)]
+        assert payload["available"] is True
+        assert len(payload["bars"]) == 1200
+
+    def test_tdx_empty_return_marks_unavailable(self):
+        """tdx 也无返回（如无效代码）→ available=False，不编造。"""
+        fetcher = FakeTdxMinuteFetcher([])
+        payload = self._svc(fetcher).get_detail("600000", period="min15", limit=100)
+        assert payload["available"] is False
+        assert payload["bars"] == []
+        assert "tdx 实时亦无返回" in payload["message"]
+
+    def test_tdx_failure_marks_unavailable_with_reason(self):
+        """tdx 拉取异常 → available=False，message 含失败原因。"""
+        class _Boom:
+            def fetch_minute_kline(self, *a, **k):
+                raise RuntimeError("connection refused")
+
+        store = FakeStore(_make_bars(10))
+        store.read_minute_bars = lambda *a, **k: []  # type: ignore[method-assign]
+        svc = StockDetailService(store=store, config=None)
+        svc._tdx_fetcher = _Boom()  # type: ignore[assignment]
+        payload = svc.get_detail("600000", period="min15", limit=100)
+        assert payload["available"] is False
+        assert "connection refused" in payload["message"]
+
+    def test_local_minute_data_wins_over_tdx(self):
+        """本地有分钟数据时优先本地（lake），不触发 tdx 回退。"""
+        fetcher = FakeTdxMinuteFetcher(_tdx_minute_rows(960, period_minutes=15))
+        store = FakeStore(_make_bars(10))
+        local = _tdx_minute_rows(320, period_minutes=15)
+        store.read_minute_bars = lambda *a, **k: local  # type: ignore[method-assign]
+        svc = StockDetailService(store=store, config=None)
+        svc._tdx_fetcher = fetcher  # type: ignore[assignment]
+        payload = svc.get_detail("600000", period="min15", limit=500)
+        assert fetcher.calls == []
+        assert payload["data_source"] == "lake"
+
+
+# --------------------------------------------------------------------- #
+# 日线级别 tdx 回退（本地 lake 未全量同步、历史残缺时的数据来源）
+# --------------------------------------------------------------------- #
+class FakeTdxDailyFetcher:
+    """tdx 日线拉取替身：记录调用参数，返回预置日线。"""
+
+    def __init__(self, bars: list[Bar]) -> None:
+        self.bars = bars
+        self.calls: list[tuple[str, int | None]] = []
+
+    def fetch_kline(self, market, code, years=10, *, count=None, **kw):
+        self.calls.append((market, count))
+        return self.bars
+
+
+class TestDailyTdxFallback:
+    def _svc(self, fetcher: FakeTdxDailyFetcher, local_n: int = 2) -> StockDetailService:
+        # 本地仅 local_n 根日线（market.db 未同步的残缺状态）
+        store = FakeStore(_make_bars(local_n))
+        svc = StockDetailService(store=store, config=None)
+        svc._tdx_fetcher = fetcher  # type: ignore[assignment]  # 注入替身跳过真实网络
+        return svc
+
+    def test_year_falls_back_when_lake_insufficient(self):
+        """本地仅 2 根日线 → 年K回退 tdx 深历史（5000 根档），重采样出多年。"""
+        fetcher = FakeTdxDailyFetcher(_make_bars(900))
+        payload = self._svc(fetcher).get_detail("600000", period="year", limit=50)
+        assert fetcher.calls == [("CN", 5000)]
+        assert payload["available"] is True
+        assert payload["data_source"] == "tdx_realtime"
+        # 900 根日线跨 2020-2022 三个自然年 → 3 根年K（回归：旧逻辑只出 1 根）
+        assert len(payload["bars"]) == 3
+        # 上市日期取 tdx 数据首根，而非本地残缺元信息
+        assert payload["listing_date"] == "2020-01-01"
+
+    def test_day_falls_back_when_lake_insufficient(self):
+        """本地 2 根 < limit+80 预热需求 → day 周期同样回退 tdx。"""
+        fetcher = FakeTdxDailyFetcher(_make_bars(900))
+        payload = self._svc(fetcher).get_detail("600000", period="day", limit=600)
+        assert payload["data_source"] == "tdx_realtime"
+        assert len(payload["bars"]) == 600
+
+    def test_tdx_not_better_keeps_lake(self):
+        """tdx 返回不比本地多（如新股）→ 沿用本地数据，来源仍 lake。"""
+        fetcher = FakeTdxDailyFetcher(_make_bars(1))
+        payload = self._svc(fetcher).get_detail("600000", period="year", limit=50)
+        assert payload["data_source"] == "lake"
+        assert len(payload["bars"]) == 1
+
+    def test_sufficient_lake_skips_tdx(self):
+        """本地数据充足（≥120 根）→ 不触发 tdx 回退。"""
+        fetcher = FakeTdxDailyFetcher(_make_bars(900))
+        payload = self._svc(fetcher, local_n=300).get_detail(
+            "600000", period="year", limit=50
+        )
+        assert fetcher.calls == []
+        assert payload["data_source"] == "lake"
+
+    def test_tdx_failure_with_partial_lake_keeps_lake(self):
+        """本地有残缺数据 + tdx 失败 → 容忍回退失败沿用本地（少好于无）。"""
+        class _Boom:
+            def fetch_kline(self, *a, **k):
+                raise RuntimeError("connection refused")
+
+        svc = StockDetailService(store=FakeStore(_make_bars(2)), config=None)
+        svc._tdx_fetcher = _Boom()  # type: ignore[assignment]
+        payload = svc.get_detail("600000", period="year", limit=50)
+        assert payload["data_source"] == "lake"
+        assert len(payload["bars"]) == 1
+
+
+# --------------------------------------------------------------------- #
+# quote：最新交易日行情快照（与周期无关，回归「年K显示单日 -27%」）
+# --------------------------------------------------------------------- #
+class TestDailyQuote:
+    def test_year_quote_is_daily_not_yearly(self):
+        """回归：年K顶部行情必须取日线最后两根，而非年K最后两根。
+
+        旧实现前端用 bars[-1]/bars[-2] 展示，年K下「昨收」= 上年收盘、
+        涨跌 = 跨年对比（如 -27%），形似数据错误；quote 固定日口径。
+        """
+        store = FakeStore(_make_bars(900))  # 2020-01-01 起连续 900 天
+        svc = StockDetailService(store=store, config=None)
+        payload = svc.get_detail("600000", period="year", limit=50)
+        q = payload["quote"]
+        assert q is not None
+        # 日线最后两根（日口径）：close=10.5+899*0.01 / prev=10.5+898*0.01
+        assert q["close"] == pytest.approx(10.5 + 899 * 0.01)
+        assert q["prev_close"] == pytest.approx(10.5 + 898 * 0.01)
+        assert q["change"] == pytest.approx(0.01)
+        assert q["date"] == (dt.date(2020, 1, 1) + dt.timedelta(days=899)).isoformat()
+        # 关键区分：年K倒数第二根是「去年收盘」，与 quote.prev_close 不同
+        yearly_prev = payload["bars"][-2]["close"]
+        assert q["prev_close"] != pytest.approx(yearly_prev)
+
+    def test_day_period_quote_matches_last_bars(self):
+        """日K周期：quote 与 bars 末两根同口径（一致性）。"""
+        store = FakeStore(_make_bars(300))
+        svc = StockDetailService(store=store, config=None)
+        payload = svc.get_detail("600000", period="day", limit=100)
+        q = payload["quote"]
+        assert q is not None
+        assert q["close"] == payload["bars"][-1]["close"]
+        assert q["prev_close"] == payload["bars"][-2]["close"]
+
+    def test_minute_period_quote_comes_from_daily(self):
+        """分钟周期：quote 仍取日线口径（本地分钟+日线均有数据）。"""
+        store = FakeStore(_make_bars(300))
+        rows = _tdx_minute_rows(240, period_minutes=1)
+        store.read_minute_bars = lambda *a, **k: rows  # type: ignore[method-assign]
+        svc = StockDetailService(store=store, config=None)
+        payload = svc.get_detail("600000", period="min5", limit=100)
+        q = payload["quote"]
+        assert q is not None
+        assert q["close"] == pytest.approx(10.5 + 299 * 0.01)
+
+    def test_unavailable_minute_still_has_daily_quote(self):
+        """分钟无数据（unavailable）时 quote 仍可用（本地日线存在）。"""
+        store = FakeStore(_make_bars(300))
+        store.read_minute_bars = lambda *a, **k: []  # type: ignore[method-assign]
+        svc = StockDetailService(store=store, config=None)  # config=None → tdx 回退不可用
+        payload = svc.get_detail("600000", period="min15", limit=100)
+        assert payload["available"] is False
+        q = payload["quote"]
+        assert q is not None
+        assert q["close"] == pytest.approx(10.5 + 299 * 0.01)
+
+    def test_tdx_fallback_quote_from_tdx_daily(self):
+        """本地残缺 + tdx 回退：quote 取 tdx 日线（比本地更全）。"""
+        fetcher = FakeTdxDailyFetcher(_make_bars(900))
+        store = FakeStore(_make_bars(2))
+        svc = StockDetailService(store=store, config=None)
+        svc._tdx_fetcher = fetcher  # type: ignore[assignment]
+        payload = svc.get_detail("600000", period="year", limit=50)
+        q = payload["quote"]
+        assert q is not None
+        # tdx 900 根的末两根，而非本地 2 根
+        assert q["close"] == pytest.approx(10.5 + 899 * 0.01)
+        assert q["prev_close"] == pytest.approx(10.5 + 898 * 0.01)
+
+    def test_minute_quote_skips_stale_local_daily(self):
+        """回归：分钟周期本地日线残缺（测试残留假数据）→ quote 走 tdx。
+
+        场景：本地 market.db 仅 2 根假日线（价格 10.x），分钟线来自 tdx
+        回退；quote 若读本地会显示假价格，必须回退 tdx 真实日线。
+        """
+        daily_fetcher = FakeTdxDailyFetcher(_make_bars(900))
+
+        class _ComboFetcher(FakeTdxDailyFetcher):
+            def fetch_minute_kline(self, market, code, *, period_minutes, count):
+                return _tdx_minute_rows(960, period_minutes=period_minutes)
+
+        combo = _ComboFetcher(daily_fetcher.bars)
+        store = FakeStore(_make_bars(2))  # 本地残缺
+        store.read_minute_bars = lambda *a, **k: []  # type: ignore[method-assign]
+        svc = StockDetailService(store=store, config=None)
+        svc._tdx_fetcher = combo  # type: ignore[assignment]
+        payload = svc.get_detail("600000", period="min15", limit=100)
+        # 分钟线走 tdx 回退成功（fetcher 也能拉日线）
+        assert payload["data_source"] == "tdx_realtime"
+        q = payload["quote"]
+        assert q is not None
+        # tdx 900 根末两根，而非本地 2 根假日线（10.5x）
+        assert q["close"] == pytest.approx(10.5 + 899 * 0.01)
+        assert q["prev_close"] == pytest.approx(10.5 + 898 * 0.01)

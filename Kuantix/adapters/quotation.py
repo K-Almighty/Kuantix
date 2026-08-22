@@ -39,9 +39,10 @@ RD-5：L1 只存原始未复权
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 from easy_tdx.mac.enums import Adjust, ExMarket, Period
@@ -56,6 +57,9 @@ from Kuantix.core.fail_loud import (
     require_finite,
 )
 from Kuantix.core.market import MarketProfile, get_market_profile
+
+if TYPE_CHECKING:
+    from Kuantix.data.market_store import MinuteBar
 
 __all__ = [
     "EX_MARKET_CODES",
@@ -114,6 +118,13 @@ _REQUIRED_KLINE_COLUMNS: tuple[str, ...] = ("open", "high", "low", "close", "vol
 
 #: 上游单次 K 线请求的分页上限（S4 实测 700/页；``get_stock_kline`` 内部自动翻页）。
 _PAGE_CAP: int = 700
+
+#: 分钟周期档位 → 上游 ``Period`` 枚举（``fetch_minute_kline`` 支持的档位）。
+_MINUTE_PERIODS: dict[int, Period] = {
+    1: Period.MIN_1,
+    15: Period.MIN_15,
+    60: Period.MIN_60,
+}
 
 
 class VolUnit(str, Enum):
@@ -328,6 +339,73 @@ class QuotationFetcher:
             frame,
             context=f"{route.market}:{code}",
             vol_divisor=divisor,
+        )
+
+    def fetch_minute_kline(
+        self,
+        market: str,
+        code: str,
+        *,
+        period_minutes: int,
+        count: int,
+        exchange: str | None = None,
+    ) -> list[MinuteBar]:
+        """拉取 A 股分钟 K 线并转成存储层 :class:`MinuteBar`。
+
+        与 :meth:`fetch_kline`（日线）同链路（``MacClient.get_stock_kline``，
+        7709），仅 ``period`` 档位不同；``vol`` 同样做 RD-8「股→手」换算
+        （实测分钟线 ``amount/close≈vol``，与日线同为「股」口径）。
+
+        Args:
+            market: 市场码（当前仅 ``CN``；港美股分钟链路未接入，fail-loud）。
+            code: 证券代码（不含交易所前缀）。
+            period_minutes: 周期档位（1/15/60 分钟）。
+            count: 拉取根数（上游自动分页，每页 700 根）。
+            exchange: A 股交易所前缀（``sh``/``sz``）；``None`` 时按代码段推断。
+
+        Returns:
+            按 ``(date, time)`` 升序的 :class:`MinuteBar` 列表（``date`` 为
+            YYYYMMDD 整数、``time`` 为 HHMM 整数，与本地分钟库口径一致）。
+
+        Raises:
+            NotSupportedError: 市场或分钟档位未支持。
+            DataIntegrityError: ``count`` 非正。
+            UpstreamContractError: 上游返回结构与预期不符。
+        """
+        route = self.route_for(market)
+        profile = get_market_profile(route.market)
+        period = _MINUTE_PERIODS.get(int(period_minutes))
+        if period is None:
+            raise NotSupportedError(
+                f"[fail-loud/NF-26] 不支持的分钟周期: {period_minutes!r}"
+                f"（支持 {sorted(_MINUTE_PERIODS)} 分钟档）"
+            )
+        if route.market != "CN":
+            raise NotSupportedError(
+                f"[fail-loud/NF-26] {route.market} 分钟线链路未接入（当前仅 CN）"
+            )
+        if int(count) <= 0:
+            raise DataIntegrityError(
+                f"[fail-loud/NF-26] count 必须为正整数，实际 {count!r}"
+            )
+        market_int = self._cn_market_int(exchange, str(code))
+        frame = self._mac_client().get_stock_kline(
+            market=market_int,
+            code=str(code),
+            period=period,
+            start=0,
+            count=int(count),
+        )
+        if not isinstance(frame, pd.DataFrame):
+            raise UpstreamContractError(
+                f"[fail-loud/NF-1] get_stock_kline({code}, {period.name}) 返回 "
+                f"{type(frame).__name__}，期望 DataFrame"
+            )
+        return self._frame_to_minute_bars(
+            frame,
+            market=route.market,
+            code=str(code),
+            lot_size=float(profile.lot_size),
         )
 
     def probe_vol_unit(
@@ -730,6 +808,68 @@ class QuotationFetcher:
         bars.sort(key=lambda b: b.date)
         self._assert_strictly_increasing(bars, context=context)
         return bars
+
+    @staticmethod
+    def _frame_to_minute_bars(
+        frame: pd.DataFrame,
+        *,
+        market: str,
+        code: str,
+        lot_size: float,
+    ) -> list[MinuteBar]:
+        """把上游分钟线 DataFrame 转成 :class:`MinuteBar`（RD-8 股→手）。
+
+        Args:
+            frame: 上游返回（含 ``datetime`` + OHLCV 列）。
+            market: 市场码。
+            code: 证券代码。
+            lot_size: 每手股数（A 股 100）。
+
+        Returns:
+            按 ``(date, time)`` 升序的 MinuteBar 列表。
+
+        Raises:
+            UpstreamContractError: 缺列或缺 ``datetime``。
+        """
+        # 延迟导入：datalake → quotation → market_store 存在包级循环，
+        # MinuteBar 运行时在此处取（模块已初始化完毕）
+        from Kuantix.data.market_store import MinuteBar
+
+        if frame.empty:
+            return []
+        context = f"{market}:{code}"
+        QuotationFetcher._assert_columns(frame, context=context)
+        if "datetime" not in frame.columns:
+            raise UpstreamContractError(
+                f"[fail-loud/NF-1] {context} 分钟线缺 datetime 列"
+                f"（实际列：{list(frame.columns)}）"
+            )
+        ts = pd.to_datetime(frame["datetime"])
+        opens = frame["open"].tolist()
+        highs = frame["high"].tolist()
+        lows = frame["low"].tolist()
+        closes = frame["close"].tolist()
+        vols = frame["vol"].tolist()
+        amounts = frame["amount"].tolist()
+        out: list[MinuteBar] = []
+        for i, t in enumerate(ts):
+            ctx = f"{context}@{t}"
+            out.append(
+                MinuteBar(
+                    market=market,
+                    code=code,
+                    date=int(t.year) * 10000 + int(t.month) * 100 + int(t.day),
+                    time=int(t.hour) * 100 + int(t.minute),
+                    open=require_finite(opens[i], f"{ctx}.open"),
+                    high=require_finite(highs[i], f"{ctx}.high"),
+                    low=require_finite(lows[i], f"{ctx}.low"),
+                    close=require_finite(closes[i], f"{ctx}.close"),
+                    vol=require_finite(vols[i], f"{ctx}.vol") / lot_size,
+                    amount=require_finite(amounts[i], f"{ctx}.amount"),
+                )
+            )
+        out.sort(key=lambda b: (b.date, b.time))
+        return out
 
     @staticmethod
     def _assert_strictly_increasing(bars: Iterable[Bar], *, context: str) -> None:

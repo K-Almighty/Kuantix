@@ -82,11 +82,46 @@ const prevClose = computed(() => {
   return detail.value.bars[detail.value.bars.length - 2].close;
 });
 
-const change = computed(() => {
+/**
+ * 顶部报价区数据：优先用后端 quote（最新交易日行情，与当前周期无关）。
+ * 周/月/年K的最后一根是跨期聚合值，直接展示会出现「单日 -27%」这类
+ * 误导数字；quote 不可得时（旧后端/极端缺数据）退化为最后一根 K 线。
+ */
+const quoteView = computed(() => {
+  const q = detail.value?.quote;
+  if (q) {
+    return {
+      date: q.date,
+      open: q.open,
+      high: q.high,
+      low: q.low,
+      close: q.close,
+      prevClose: q.prev_close,
+      vol: q.vol,
+      amount: q.amount,
+      turnover: q.turnover,
+    };
+  }
   if (!last.value || !prevClose.value) return null;
   return {
-    abs: last.value.close - prevClose.value,
-    pct: ((last.value.close - prevClose.value) / prevClose.value) * 100,
+    date: last.value.date,
+    open: last.value.open,
+    high: last.value.high,
+    low: last.value.low,
+    close: last.value.close,
+    prevClose: prevClose.value,
+    vol: last.value.vol,
+    amount: last.value.amount,
+    turnover: last.value.turnover,
+  };
+});
+
+const change = computed(() => {
+  const q = quoteView.value;
+  if (!q || !q.prevClose) return null;
+  return {
+    abs: q.close - q.prevClose,
+    pct: ((q.close - q.prevClose) / q.prevClose) * 100,
   };
 });
 
@@ -108,7 +143,8 @@ async function load(): Promise<void> {
     const env = await api.getStockDetail(code.value, {
       market: 'CN',
       period: period.value,
-      limit: 600,
+      // 分时（5 日 1 分钟）需完整窗口 1200 根；其余周期 600 根足够
+      limit: period.value === 'min5' ? 1500 : 600,
       indicators: 'ma,macd,kdj,rsi',
     });
     if (seq !== loadSeq) return;
@@ -167,26 +203,26 @@ watch(code, () => void load());
         >tdx 实时</span>
       </div>
 
-      <template v-if="last && change">
-        <div class="sd-price" :style="{ color }">
-          <span class="sd-last">{{ last.close.toFixed(2) }}</span>
+      <template v-if="quoteView && change">
+        <div class="sd-price" :style="{ color }" :title="`行情日期：${quoteView.date}`">
+          <span class="sd-last">{{ quoteView.close.toFixed(2) }}</span>
           <span class="sd-chg">
             {{ change.abs >= 0 ? '+' : '' }}{{ change.abs.toFixed(2) }}
             ({{ change.pct >= 0 ? '+' : '' }}{{ change.pct.toFixed(2) }}%)
           </span>
         </div>
         <div class="sd-quote-grid">
-          <div><label>今开</label><span>{{ last.open.toFixed(2) }}</span></div>
-          <div><label>昨收</label><span>{{ prevClose?.toFixed(2) }}</span></div>
-          <div><label>最高</label><span :style="{ color: UP }">{{ last.high.toFixed(2) }}</span></div>
-          <div><label>最低</label><span :style="{ color: DOWN }">{{ last.low.toFixed(2) }}</span></div>
-          <div><label>成交量</label><span>{{ fmtBig(last.vol) }}</span></div>
-          <div><label>成交额</label><span>{{ fmtBig(last.amount) }}</span></div>
+          <div><label>今开</label><span>{{ quoteView.open.toFixed(2) }}</span></div>
+          <div><label>昨收</label><span>{{ quoteView.prevClose?.toFixed(2) }}</span></div>
+          <div><label>最高</label><span :style="{ color: UP }">{{ quoteView.high.toFixed(2) }}</span></div>
+          <div><label>最低</label><span :style="{ color: DOWN }">{{ quoteView.low.toFixed(2) }}</span></div>
+          <div><label>成交量</label><span>{{ fmtBig(quoteView.vol) }}</span></div>
+          <div><label>成交额</label><span>{{ fmtBig(quoteView.amount) }}</span></div>
           <div>
             <label>换手率</label>
             <span>
-              <template v-if="last.turnover > 0">
-                {{ (last.turnover * 100).toFixed(2) }}%
+              <template v-if="quoteView.turnover > 0">
+                {{ (quoteView.turnover * 100).toFixed(2) }}%
                 <em v-if="detail?.turnover_estimated" class="sd-est">估</em>
               </template>
               <template v-else>--</template>
@@ -242,6 +278,7 @@ watch(code, () => void load());
         v-else-if="detail && detail.bars.length"
         :bars="detail.bars"
         :indicators="detail.indicators"
+        :period="period"
         :show-ma="showMa"
         :show-volume="showVolume"
         :show-macd="showMacd"
