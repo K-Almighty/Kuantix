@@ -317,17 +317,49 @@ class SecuritySearchService:
         枚举生成的 securities 表含债券/指数/基金/B 股等非股票类型；按用户
         「优先保证 A 股」的要求，此处只保留 ``*_A_STOCK`` 类型（创业板/科创
         板/北交所均为 A 股），过滤其余类型，避免监控看板搜索混入无关标的。
+
+        另并入 ``daily_bars`` 已有数据、但清单缺失的 A 股代码：securities
+        表主键 ``(market, code)`` 无交易所列，000001-000999 区间沪市指数行
+        会覆盖同代码深市股票行（如 sz000001 平安银行），这些股票的行情
+        已入库却搜不到；此处按代码前缀推导类型补入（名称为空，展示由
+        详情页/自选股兜底），保证「有数据的代码必可搜到」。
         """
         if self._store is None:
             return []
         # 类型过滤下推到 SQL：全表 17634 条中 A 股 5119 条，避免为债券/
         # 指数/基金白构造 12515 个 Security 对象（冷启动 30ms → 8ms）。
         try:
-            return self._store.list_securities(security_types=sorted(A_STOCK_TYPES))
+            securities = list(
+                self._store.list_securities(security_types=sorted(A_STOCK_TYPES))
+            )
         except TypeError:
             # 注入的测试替身可能没有 security_types 形参，退化为内存过滤
             all_sec = self._store.list_securities()
-            return [s for s in all_sec if s.security_type in A_STOCK_TYPES]
+            securities = [s for s in all_sec if s.security_type in A_STOCK_TYPES]
+        known = {s.code for s in securities}
+        try:
+            bar_codes = self._store.list_daily_bar_codes("CN")
+        except Exception:  # noqa: BLE001 - 兜底失败不影响主清单
+            bar_codes = []
+        for code in bar_codes:
+            code = str(code)
+            if code in known or not code.startswith(_A_STOCK_CODE_PREFIXES):
+                continue
+            exchange, security_type = _derive_exchange_type(code)
+            try:
+                securities.append(
+                    Security(
+                        code=code,
+                        exchange=exchange,
+                        market="CN",
+                        security_type=security_type,
+                        name="",
+                    )
+                )
+                known.add(code)
+            except DataIntegrityError:
+                continue
+        return securities
 
     def _read_cache(self) -> list[Security]:
         """读取旧缓存 JSON 文件 → :class:`Security` 列表（D9 只读兼容）。"""

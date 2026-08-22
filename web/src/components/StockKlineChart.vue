@@ -1,71 +1,139 @@
 <script setup lang="ts">
 /**
- * 个股 K 线图（StockKlineChart）：通达信风格，多指标叠加。
- * - 主图：蜡烛 + MA5/10/20/60（可独立开关）
- * - 成交量副图（涨红跌绿，可开关）
- * - MACD / KDJ / RSI 三个技术指标副图（可独立开关）
- * - tooltip 含 OHLC + 量额 + 换手率
+ * 个股 K 线图（StockKlineChart）：通达信风格专业图表引擎。
+ * - 主图：蜡烛 + MA（窗口自定义）+ BOLL / ENE / SAR 叠加
+ * - 副图：VOL / MACD / KDJ / RSI / WR / BIAS / OBV 独立开关，多面板动态布局
+ * - 左侧涨跌幅百分比刻度 + 右侧价格刻度（隐形高低线承接范围，缩放联动）
+ * - 十字光标全图联动 + 滚轮缩放 + 拖拽平移 + tooltip（OHLCV + MA）
+ * - 画线工具：趋势线 / 水平线 / 矩形 / 黄金分割 / 文本标注（数据坐标，缩放自动跟随）
+ * - 配色：红涨绿跌（A股习惯，固定）
  * 数据来自 StockDetail（后端 /stock/detail/{code}）。
  */
-import { computed } from 'vue';
+import { computed, ref, watch } from 'vue';
+import type * as echarts from 'echarts/core';
 import type { EChartsCoreOption } from 'echarts/core';
-import type { StockBar, StockIndicators } from '../types';
+import type { DrawTool, StockBar, StockIndicators } from '../types';
 import { fmtBig } from '../utils/format';
 import EChart from './EChart.vue';
+
+type ChartHandle = ReturnType<typeof echarts.init>;
+type SubPanelKey = 'volume' | 'macd' | 'kdj' | 'rsi' | 'wr' | 'bias' | 'obv';
+
+interface TrendDrawing { kind: 'trend'; x1: number; y1: number; x2: number; y2: number }
+interface HLineDrawing { kind: 'hline'; y: number }
+interface RectDrawing { kind: 'rect'; x1: number; y1: number; x2: number; y2: number }
+interface FibDrawing { kind: 'fib'; x1: number; y1: number; x2: number; y2: number }
+interface TextDrawing { kind: 'text'; x: number; y: number; text: string }
+type Drawing = TrendDrawing | HLineDrawing | RectDrawing | FibDrawing | TextDrawing;
 
 const props = withDefaults(
   defineProps<{
     bars: StockBar[];
     indicators?: StockIndicators;
     height?: string;
-    /** 当前周期键（day/week/month/year/min5/min15/min60）：决定时间轴标签粒度 */
+    /** 当前周期键：决定时间轴标签粒度 */
     period?: string;
-    showVolume?: boolean;
+    /** 主图指标开关 */
     showMa?: boolean;
+    showBoll?: boolean;
+    showEne?: boolean;
+    showSar?: boolean;
+    /** MA 均线窗口（参数面板自定义） */
+    maWindows?: number[];
+    /** 副图指标开关 */
+    showVolume?: boolean;
     showMacd?: boolean;
     showKdj?: boolean;
     showRsi?: boolean;
-    /** 上市日期（YYYY-MM-DD）；用于动态确定数据起点与展示锚点 */
+    showWr?: boolean;
+    showBias?: boolean;
+    showObv?: boolean;
+    /** 深色主题 */
+    dark?: boolean;
+    /** 涨跌配色（默认红涨绿跌） */
+    upColor?: string;
+    downColor?: string;
+    /** 画线工具（绘制完成后自动复位为 none） */
+    drawTool?: DrawTool;
+    /** 上市日期（YYYY-MM-DD）：动态起点锚点 */
     listingDate?: string;
   }>(),
   {
     indicators: () => ({}),
     height: '560px',
     period: 'day',
-    showVolume: true,
     showMa: true,
+    showBoll: false,
+    showEne: false,
+    showSar: false,
+    maWindows: () => [5, 10, 20, 60],
+    showVolume: true,
     showMacd: true,
     showKdj: false,
     showRsi: false,
+    showWr: false,
+    showBias: false,
+    showObv: false,
+    dark: false,
+    upColor: '#ef4444',
+    downColor: '#22c55e',
+    drawTool: 'none',
     listingDate: '',
   },
 );
 
+const emit = defineEmits<{ 'update:drawTool': [tool: DrawTool] }>();
+
+const MA_COLORS = ['#f59e0b', '#3b82f6', '#a855f7', '#14b8a6', '#ef4444', '#0ea5e9', '#eab308', '#f472b6'];
+const FIB_LEVELS = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
+
+const up = computed(() => props.upColor);
+const down = computed(() => props.downColor);
+
+/** 主题色板（深/浅） */
+const theme = computed(() =>
+  props.dark
+    ? {
+        split: '#272c38',
+        label: '#8b95a5',
+        tooltipBg: 'rgba(15,19,26,0.96)',
+        tooltipBorder: '#2b3340',
+        tooltipText: '#d7dfeb',
+        zoomFiller: 'rgba(56,130,246,0.18)',
+        zoomLine: '#3b4352',
+        zoomArea: 'rgba(59,130,246,0.08)',
+      }
+    : {
+        split: '#eef0f4',
+        label: '#6b7280',
+        tooltipBg: 'rgba(255,255,255,0.97)',
+        tooltipBorder: '#d9dee6',
+        tooltipText: '#1f2937',
+        zoomFiller: 'rgba(47,111,237,0.12)',
+        zoomLine: '#bbb',
+        zoomArea: '#eef2ff',
+      },
+);
+
+const dates = computed(() => props.bars.map((b) => b.datetime));
+const candles = computed(() => props.bars.map((b) => [b.open, b.close, b.low, b.high]));
+
 /**
  * 动态缩放起点（通达信风格：默认聚焦近期、可回溯全历史）。
- * - 数据量 ≤ MIN_FULL 根：全量展示（start=0）；
- * - 数据量 > MIN_FULL：默认展示最近 DEFAULT_SPAN 根（如日K≈1年），
- *   起点按实际占比换算，确保新股/老股都有合理锚点而非统一截断。
+ * - 数据量 ≤ MIN_FULL 根：全量展示；
+ * - 分钟/分时数据：短窗口默认全量展示；
+ * - 其余：默认展示最近 DEFAULT_SPAN 根（日K≈1年）。
  */
 const MIN_FULL = 300;
 const DEFAULT_SPAN = 250;
 const zoomStart = computed(() => {
   const n = props.bars.length;
   if (n <= MIN_FULL) return 0;
-  // 分钟/分时周期：短窗口数据默认全量展示（通达信分时习惯）
   if (props.bars[n - 1]?.datetime.includes(' ')) return 0;
   return Math.max(0, ((n - DEFAULT_SPAN) / n) * 100);
 });
 
-const UP = '#ef4444'; // 涨（红，A股习惯）
-const DOWN = '#22c55e'; // 跌（绿）
-
-const dates = computed(() => props.bars.map((b) => b.datetime));
-const candles = computed(() =>
-  props.bars.map((b) => [b.open, b.close, b.low, b.high]),
-);
-
-/** 数据集标识：长度 + 首末时间。变化（切换周期/标的）时重置缩放，仅开关指标时保留缩放 */
+/** 数据集标识：变化（切换周期/标的/复权）时重置缩放并清空画线 */
 const resetKey = computed(
   () =>
     `${props.bars.length}:${props.bars[0]?.datetime ?? ''}:${
@@ -73,59 +141,39 @@ const resetKey = computed(
     }`,
 );
 
+/** 涨跌幅刻度基准：区间首根开盘价（百分比坐标语义） */
+const pctBase = computed(() => props.bars[0]?.open ?? props.bars[0]?.close ?? null);
+
+function pctLabel(v: number): string {
+  const base = pctBase.value;
+  if (base == null || !base) return v.toFixed(2);
+  const p = (v / base - 1) * 100;
+  return `${p >= 0 ? '+' : ''}${p.toFixed(2)}%`;
+}
+
 function volColor(bar: StockBar): string {
-  return bar.close >= bar.open ? UP : DOWN;
+  return bar.close >= bar.open ? up.value : down.value;
 }
 
 const volumes = computed(() =>
-  props.bars.map((b, i) => ({
+  props.bars.map((b) => ({
     value: b.vol,
     itemStyle: { color: volColor(b) },
-    x: i,
   })),
 );
 
-/** 动态构建 grid（主图固定，副图随开关追加） */
-const layout = computed(() => {
-  const subPanels: string[] = [];
-  if (props.showVolume) subPanels.push('volume');
-  if (props.showMacd) subPanels.push('macd');
-  if (props.showKdj) subPanels.push('kdj');
-  if (props.showRsi) subPanels.push('rsi');
-
-  // 底部预留 13%：最底副图时间轴标签（~16px）+ 安全间距 + 缩放滑块（18px），
-  // 避免两者互相遮挡导致时间标签展示不全
-  const grids: Array<Record<string, unknown>> = [
-    { left: 56, right: 16, top: 26, height: '40%' },
-  ];
-  const n = subPanels.length;
-  if (n > 0) {
-    const areaTop = 68;
-    const areaBottom = 87;
-    const gap = 1.5;
-    const each = (areaBottom - areaTop - gap * (n - 1)) / n;
-    subPanels.forEach((_, idx) => {
-      const top = areaTop + (each + gap) * idx;
-      grids.push({ left: 56, right: 16, top: `${top}%`, height: `${each}%` });
-    });
-  }
-  return { subPanels, grids };
-});
-
 /**
- * 时间轴短标签（按周期粒度，避免"年K全是 12-31"这类无信息量标签）：
- * - 年K：显示 YYYY（每根 K 即一年）；
- * - 月K：显示 YYYY-MM；
- * - 日/周K：常规显示 MM-DD，跨年首根显示 YYYY-MM（年份锚点）；
- * - 分钟周期：同日显示 HH:MM，跨日首根显示 MM-DD（日界锚点）。
+ * 时间轴短标签（按周期粒度）：
+ * - 年K：YYYY；季K：YYYY-Qn；月K：YYYY-MM；
+ * - 日/周K：MM-DD，跨年首根显示 YYYY-MM；
+ * - 分钟周期：同日 HH:MM，跨日首根显示 MM-DD。
  */
 const axisLabels = computed(() => {
-  if (props.period === 'year') {
-    return dates.value.map((d) => d.slice(0, 4));
+  if (props.period === 'year') return dates.value.map((d) => d.slice(0, 4));
+  if (props.period === 'quarter') {
+    return dates.value.map((d) => `${d.slice(0, 4)}-Q${Math.floor((Number(d.slice(5, 7)) - 1) / 3) + 1}`);
   }
-  if (props.period === 'month') {
-    return dates.value.map((d) => d.slice(0, 7));
-  }
+  if (props.period === 'month') return dates.value.map((d) => d.slice(0, 7));
   const out: string[] = [];
   let lastDay = '';
   let lastYear = '';
@@ -145,43 +193,168 @@ const axisLabels = computed(() => {
   return out;
 });
 
+/** 动态 grid 布局：主图固定 + 副图随开关追加（等分 68%~87% 区域） */
+const layout = computed(() => {
+  const keys: SubPanelKey[] = [];
+  if (props.showVolume) keys.push('volume');
+  if (props.showMacd) keys.push('macd');
+  if (props.showKdj) keys.push('kdj');
+  if (props.showRsi) keys.push('rsi');
+  if (props.showWr) keys.push('wr');
+  if (props.showBias) keys.push('bias');
+  if (props.showObv) keys.push('obv');
+
+  const grids: Array<Record<string, unknown>> = [{ left: 68, right: 60, top: 26, height: '40%' }];
+  const panels: Array<{ key: SubPanelKey; top: number }> = [];
+  const n = keys.length;
+  if (n > 0) {
+    const areaTop = 68;
+    const areaBottom = 87;
+    const gap = 1.5;
+    const each = (areaBottom - areaTop - gap * (n - 1)) / n;
+    keys.forEach((key, idx) => {
+      const top = areaTop + (each + gap) * idx;
+      grids.push({ left: 68, right: 60, top: `${top}%`, height: `${each}%` });
+      panels.push({ key, top });
+    });
+  }
+  return { grids, panels };
+});
+
+/* ---------------- 画线工具 ---------------- */
+
+const drawings = ref<Drawing[]>([]);
+let pending: { x: number; y: number } | null = null;
+const chartHandle = ref<ChartHandle | null>(null);
+
+function onChartReady(chart: ChartHandle): void {
+  chartHandle.value = chart;
+  chart.getZr().on('click', (ev: unknown) => onCanvasClick(ev as { offsetX: number; offsetY: number }));
+}
+
+function onCanvasClick(ev: { offsetX: number; offsetY: number }): void {
+  const chart = chartHandle.value;
+  const tool = props.drawTool;
+  if (!chart || tool === 'none' || props.bars.length === 0) return;
+  let pt: [number, number];
+  try {
+    pt = chart.convertFromPixel({ gridIndex: 0 }, [ev.offsetX, ev.offsetY]) as [number, number];
+  } catch {
+    return;
+  }
+  if (!pt || !Number.isFinite(pt[0]) || !Number.isFinite(pt[1])) return;
+  const x = Math.max(0, Math.min(props.bars.length - 1, Math.round(pt[0])));
+  const y = Math.round(pt[1] * 1e4) / 1e4;
+  if (tool === 'hline') {
+    drawings.value.push({ kind: 'hline', y });
+    finishDraw();
+  } else if (tool === 'text') {
+    const text = window.prompt('输入标注文本：')?.trim();
+    if (text) drawings.value.push({ kind: 'text', x, y, text });
+    finishDraw();
+  } else if (tool === 'trend' || tool === 'rect' || tool === 'fib') {
+    if (!pending) {
+      pending = { x, y };
+    } else {
+      drawings.value.push({ kind: tool, x1: pending.x, y1: pending.y, x2: x, y2: y } as Drawing);
+      pending = null;
+      finishDraw();
+    }
+  }
+}
+
+function finishDraw(): void {
+  pending = null;
+  emit('update:drawTool', 'none');
+}
+
+function clearDrawings(): void {
+  drawings.value = [];
+  pending = null;
+}
+
+defineExpose({ clearDrawings });
+
+// 数据集切换后旧画线坐标失效，清空；工具切换时丢弃未完成的第一个锚点
+watch(
+  () => resetKey.value,
+  () => {
+    drawings.value = [];
+    pending = null;
+  },
+);
+watch(
+  () => props.drawTool,
+  () => {
+    pending = null;
+  },
+);
+
+function lastVal(arr: (number | null)[] | undefined): number | null {
+  return arr?.[arr.length - 1] ?? null;
+}
+
+function fmt2(v: number | null): string {
+  return v == null ? '--' : v.toFixed(2);
+}
+
+/* ---------------- option 组装 ---------------- */
+
 const option = computed<EChartsCoreOption>(() => {
-  const { subPanels, grids } = layout.value;
+  const { grids, panels } = layout.value;
   const series: Array<Record<string, unknown>> = [];
   const xAxes: Array<Record<string, unknown>> = [];
   const yAxes: Array<Record<string, unknown>> = [];
-  const legendData: string[] = [];
+  const graphic: Array<Record<string, unknown>> = [];
+  const dim = theme.value.label;
 
-  // 主图 xAxis
+  // 主图 xAxis（0）
   xAxes.push({
     type: 'category',
     data: dates.value,
     gridIndex: 0,
     boundaryGap: true,
     axisLabel: { show: false },
+    axisTick: { show: false },
+    axisLine: { lineStyle: { color: theme.value.split } },
+  });
+  // 主图 yAxis：0 = 左侧涨跌幅百分比刻度；1 = 右侧价格刻度
+  yAxes.push({
+    type: 'value',
+    gridIndex: 0,
+    position: 'left',
+    scale: true,
+    splitLine: { show: false },
+    axisLine: { show: false },
+    axisTick: { show: false },
+    axisLabel: { color: dim, fontSize: 10, formatter: (v: number) => pctLabel(v) },
+    axisPointer: { label: { formatter: (p: { value: number }) => pctLabel(p.value) } },
   });
   yAxes.push({
     type: 'value',
-    scale: true,
     gridIndex: 0,
-    splitLine: { show: true, lineStyle: { color: '#eee' } },
+    position: 'right',
+    scale: true,
+    splitLine: { show: true, lineStyle: { color: theme.value.split } },
+    axisLine: { show: false },
+    axisTick: { show: false },
+    axisLabel: { color: dim, fontSize: 10 },
   });
 
-  // 蜡烛
+  // 蜡烛（主图，价格轴）
   const candleSeries: Record<string, unknown> = {
     name: 'K线',
     type: 'candlestick',
     data: candles.value,
     xAxisIndex: 0,
-    yAxisIndex: 0,
+    yAxisIndex: 1,
     itemStyle: {
-      color: UP,
-      color0: DOWN,
-      borderColor: UP,
-      borderColor0: DOWN,
+      color: up.value,
+      color0: down.value,
+      borderColor: up.value,
+      borderColor0: down.value,
     },
   };
-  // 上市日期标记线（动态起点锚点；仅当 listingDate 落在数据区间内时绘制）
   if (props.listingDate && dates.value.length) {
     const firstDate = dates.value[0].slice(0, 10);
     const lastDate = dates.value[dates.value.length - 1].slice(0, 10);
@@ -190,149 +363,404 @@ const option = computed<EChartsCoreOption>(() => {
         symbol: 'none',
         silent: true,
         lineStyle: { color: '#9ca3af', type: 'dotted', width: 1 },
-        label: {
-          formatter: '上市',
-          color: '#6b7280',
-          fontSize: 10,
-          position: 'insideStartTop',
-        },
+        label: { formatter: '上市', color: dim, fontSize: 10, position: 'insideStartTop' },
         data: [{ xAxis: props.listingDate }],
       };
     }
   }
   series.push(candleSeries);
-  legendData.push('K线');
 
-  // MA 线（主图叠加）
-  const maMap: Array<[keyof StockIndicators, string, string]> = [
-    ['ma5', 'MA5', '#f59e0b'],
-    ['ma10', 'MA10', '#3b82f6'],
-    ['ma20', 'MA20', '#a855f7'],
-    ['ma60', 'MA60', '#14b8a6'],
-  ];
+  // 左侧涨跌幅轴的隐形高低线（承接与蜡烛一致的范围，缩放联动）
+  series.push({
+    name: '_pctHigh',
+    type: 'line',
+    data: props.bars.map((b) => b.high),
+    xAxisIndex: 0,
+    yAxisIndex: 0,
+    showSymbol: false,
+    silent: true,
+    z: 0,
+    lineStyle: { opacity: 0 },
+    emphasis: { disabled: true },
+  });
+  series.push({
+    name: '_pctLow',
+    type: 'line',
+    data: props.bars.map((b) => b.low),
+    xAxisIndex: 0,
+    yAxisIndex: 0,
+    showSymbol: false,
+    silent: true,
+    z: 0,
+    lineStyle: { opacity: 0 },
+    emphasis: { disabled: true },
+  });
+
+  // 主图指标标签行（通达信风格：指标名 + 最新值）
+  const mainSegs: Array<[string, string]> = [];
   if (props.showMa) {
-    for (const [key, name, color] of maMap) {
-      const arr = props.indicators[key] as (number | null)[] | undefined;
-      if (!arr) continue;
+    props.maWindows.forEach((w, i) => {
+      const v = lastVal(props.indicators[`ma${w}`] as (number | null)[] | undefined);
+      mainSegs.push([`MA${w}:${fmt2(v)}`, MA_COLORS[i % MA_COLORS.length]]);
+    });
+  }
+  if (props.showBoll && props.indicators.boll) {
+    const b = props.indicators.boll;
+    mainSegs.push([
+      `BOLL(20,2) UP:${fmt2(lastVal(b.upper))} MID:${fmt2(lastVal(b.mid))} LOW:${fmt2(lastVal(b.lower))}`,
+      '#a78bfa',
+    ]);
+  }
+  if (props.showEne && props.indicators.ene) {
+    const e = props.indicators.ene;
+    mainSegs.push([
+      `ENE UP:${fmt2(lastVal(e.upper))} ENE:${fmt2(lastVal(e.ene))} LOW:${fmt2(lastVal(e.lower))}`,
+      '#f472b6',
+    ]);
+  }
+  if (props.showSar && props.indicators.sar) {
+    mainSegs.push([`SAR:${fmt2(lastVal(props.indicators.sar.sar))}`, '#60a5fa']);
+  }
+  let gx = 72;
+  for (const [text, color] of mainSegs) {
+    graphic.push({
+      type: 'text',
+      left: gx,
+      top: 4,
+      silent: true,
+      z: 300,
+      style: { text, fill: color, fontSize: 11, fontFamily: 'ui-monospace, monospace' },
+    });
+    gx += text.length * 7 + 16;
+  }
+
+  // MA 均线（主图叠加，窗口自定义）
+  if (props.showMa) {
+    props.maWindows.forEach((w, i) => {
+      const arr = props.indicators[`ma${w}`] as (number | null)[] | undefined;
+      if (!arr) return;
       series.push({
-        name,
+        name: `MA${w}`,
         type: 'line',
         data: arr,
         xAxisIndex: 0,
-        yAxisIndex: 0,
+        yAxisIndex: 1,
         smooth: true,
         showSymbol: false,
-        lineStyle: { width: 1, color },
+        lineStyle: { width: 1, color: MA_COLORS[i % MA_COLORS.length] },
         connectNulls: false,
       });
-      legendData.push(name);
+    });
+  }
+
+  // BOLL 布林带（主图）
+  if (props.showBoll && props.indicators.boll) {
+    const { upper, mid, lower } = props.indicators.boll;
+    for (const [nm, arr, col] of [
+      ['BOLL_UP', upper, '#a78bfa'],
+      ['BOLL_MID', mid, '#eab308'],
+      ['BOLL_LOW', lower, '#4ade80'],
+    ] as Array<[string, (number | null)[], string]>) {
+      series.push({
+        name: nm,
+        type: 'line',
+        data: arr,
+        xAxisIndex: 0,
+        yAxisIndex: 1,
+        showSymbol: false,
+        lineStyle: { width: 1, color: col },
+        connectNulls: false,
+      });
     }
   }
 
-  // 副图
-  let gridIdx = 1;
-  const axisIndexByPanel: Record<string, number> = {};
+  // ENE 轨道线（主图）
+  if (props.showEne && props.indicators.ene) {
+    const { upper, ene, lower } = props.indicators.ene;
+    for (const [nm, arr, col] of [
+      ['ENE_UP', upper, '#f472b6'],
+      ['ENE', ene, '#38bdf8'],
+      ['ENE_LOW', lower, '#f472b6'],
+    ] as Array<[string, (number | null)[], string]>) {
+      series.push({
+        name: nm,
+        type: 'line',
+        data: arr,
+        xAxisIndex: 0,
+        yAxisIndex: 1,
+        showSymbol: false,
+        lineStyle: { width: 1, color: col, type: nm === 'ENE' ? 'solid' : 'dashed' },
+        connectNulls: false,
+      });
+    }
+  }
 
-  for (const panel of subPanels) {
-    const gi = gridIdx;
-    axisIndexByPanel[panel] = gi;
+  // SAR 抛物线转向（主图散点）
+  if (props.showSar && props.indicators.sar) {
+    series.push({
+      name: 'SAR',
+      type: 'scatter',
+      data: props.indicators.sar.sar,
+      xAxisIndex: 0,
+      yAxisIndex: 1,
+      symbolSize: 2.5,
+      itemStyle: { color: '#60a5fa' },
+    });
+  }
+
+  // 副图坐标（xAxisIndex = grid 序号；yAxisIndex 顺延主图双轴之后）
+  panels.forEach((panel, idx) => {
+    const gi = idx + 1;
+    const yi = idx + 2;
+    const fixed = panel.key === 'rsi' || panel.key === 'wr';
     xAxes.push({
       type: 'category',
       data: dates.value,
       gridIndex: gi,
       boundaryGap: true,
+      axisTick: { show: false },
+      axisLine: { lineStyle: { color: theme.value.split } },
       axisLabel: {
-        show: panel === subPanels[subPanels.length - 1],
-        // 重叠标签自动隐藏（分钟周期 1200 根时保证时间轴可读）
+        show: idx === panels.length - 1,
         hideOverlap: true,
-        formatter: (_v: string, idx: number) => axisLabels.value[idx] ?? '',
+        color: dim,
+        fontSize: 10,
+        formatter: (_v: string, i: number) => axisLabels.value[i] ?? '',
       },
     });
     yAxes.push({
       type: 'value',
       gridIndex: gi,
+      scale: !fixed,
+      min: fixed ? 0 : undefined,
+      max: fixed ? 100 : undefined,
       splitLine: { show: false },
-      scale: true,
-      // 大数缩写（年K成交量上亿手，全数字刻度会重叠成"000,000"）
-      axisLabel: { formatter: (v: number) => fmtBig(v, 1) },
+      axisLine: { show: false },
+      axisTick: { show: false },
+      axisLabel: { color: dim, fontSize: 10, formatter: (v: number) => fmtBig(v, 1) },
     });
-    gridIdx += 1;
-  }
+  });
 
-  // 成交量
+  const yiOf = (idx: number): number => idx + 2;
+
+  // 成交量副图
   if (props.showVolume) {
-    const gi = axisIndexByPanel['volume'];
+    const idx = panels.findIndex((p) => p.key === 'volume');
     series.push({
-      name: '成交量',
+      name: 'VOL',
       type: 'bar',
       data: volumes.value,
-      xAxisIndex: gi,
-      yAxisIndex: gi,
-      barWidth: '70%',
+      xAxisIndex: idx + 1,
+      yAxisIndex: yiOf(idx),
+      barWidth: '60%',
     });
-    legendData.push('成交量');
   }
 
-  // MACD
+  // MACD 副图
   if (props.showMacd && props.indicators.macd) {
-    const gi = axisIndexByPanel['macd'];
+    const idx = panels.findIndex((p) => p.key === 'macd');
     const { dif, dea, macd } = props.indicators.macd;
     series.push({
-      name: 'DIF', type: 'line', data: dif, xAxisIndex: gi, yAxisIndex: gi,
+      name: 'DIF', type: 'line', data: dif, xAxisIndex: idx + 1, yAxisIndex: yiOf(idx),
       showSymbol: false, lineStyle: { width: 1, color: '#f59e0b' }, connectNulls: false,
     });
     series.push({
-      name: 'DEA', type: 'line', data: dea, xAxisIndex: gi, yAxisIndex: gi,
+      name: 'DEA', type: 'line', data: dea, xAxisIndex: idx + 1, yAxisIndex: yiOf(idx),
       showSymbol: false, lineStyle: { width: 1, color: '#3b82f6' }, connectNulls: false,
     });
     series.push({
-      name: 'MACD', type: 'bar', data: macd, xAxisIndex: gi, yAxisIndex: gi,
+      name: 'MACD', type: 'bar', data: macd, xAxisIndex: idx + 1, yAxisIndex: yiOf(idx),
       itemStyle: {
         color: (p: { value: number | null }) =>
-          p.value == null ? '#ccc' : (p.value as number) >= 0 ? UP : DOWN,
+          p.value == null ? '#ccc' : (p.value as number) >= 0 ? up.value : down.value,
       },
     });
-    legendData.push('DIF', 'DEA', 'MACD');
   }
 
-  // KDJ
+  // KDJ 副图
   if (props.showKdj && props.indicators.kdj) {
-    const gi = axisIndexByPanel['kdj'];
+    const idx = panels.findIndex((p) => p.key === 'kdj');
     const { k, d, j } = props.indicators.kdj;
     for (const [nm, arr, col] of [
       ['K', k, '#f59e0b'], ['D', d, '#3b82f6'], ['J', j, '#a855f7'],
     ] as Array<[string, (number | null)[], string]>) {
       series.push({
-        name: nm, type: 'line', data: arr, xAxisIndex: gi, yAxisIndex: gi,
+        name: nm, type: 'line', data: arr, xAxisIndex: idx + 1, yAxisIndex: yiOf(idx),
         showSymbol: false, lineStyle: { width: 1, color: col }, connectNulls: false,
       });
     }
-    legendData.push('K', 'D', 'J');
   }
 
-  // RSI
+  // RSI 副图
   if (props.showRsi && props.indicators.rsi) {
-    const gi = axisIndexByPanel['rsi'];
+    const idx = panels.findIndex((p) => p.key === 'rsi');
     const { rsi6, rsi12, rsi24 } = props.indicators.rsi;
     for (const [nm, arr, col] of [
       ['RSI6', rsi6, '#f59e0b'], ['RSI12', rsi12, '#3b82f6'], ['RSI24', rsi24, '#a855f7'],
     ] as Array<[string, (number | null)[], string]>) {
       series.push({
-        name: nm, type: 'line', data: arr, xAxisIndex: gi, yAxisIndex: gi,
+        name: nm, type: 'line', data: arr, xAxisIndex: idx + 1, yAxisIndex: yiOf(idx),
         showSymbol: false, lineStyle: { width: 1, color: col }, connectNulls: false,
       });
     }
-    legendData.push('RSI6', 'RSI12', 'RSI24');
   }
+
+  // WR 副图
+  if (props.showWr && props.indicators.wr) {
+    const idx = panels.findIndex((p) => p.key === 'wr');
+    const { wr6, wr10 } = props.indicators.wr;
+    for (const [nm, arr, col] of [
+      ['WR10', wr10, '#f59e0b'], ['WR6', wr6, '#3b82f6'],
+    ] as Array<[string, (number | null)[], string]>) {
+      series.push({
+        name: nm, type: 'line', data: arr, xAxisIndex: idx + 1, yAxisIndex: yiOf(idx),
+        showSymbol: false, lineStyle: { width: 1, color: col }, connectNulls: false,
+      });
+    }
+  }
+
+  // BIAS 副图
+  if (props.showBias && props.indicators.bias) {
+    const idx = panels.findIndex((p) => p.key === 'bias');
+    const { bias6, bias12, bias24 } = props.indicators.bias;
+    for (const [nm, arr, col] of [
+      ['BIAS6', bias6, '#f59e0b'], ['BIAS12', bias12, '#3b82f6'], ['BIAS24', bias24, '#a855f7'],
+    ] as Array<[string, (number | null)[], string]>) {
+      series.push({
+        name: nm, type: 'line', data: arr, xAxisIndex: idx + 1, yAxisIndex: yiOf(idx),
+        showSymbol: false, lineStyle: { width: 1, color: col }, connectNulls: false,
+      });
+    }
+  }
+
+  // OBV 副图
+  if (props.showObv && props.indicators.obv) {
+    const idx = panels.findIndex((p) => p.key === 'obv');
+    series.push({
+      name: 'OBV', type: 'line', data: props.indicators.obv.obv, xAxisIndex: idx + 1, yAxisIndex: yiOf(idx),
+      showSymbol: false, lineStyle: { width: 1, color: '#38bdf8' }, connectNulls: false,
+    });
+  }
+
+  // 副图指标标签（面板左上角，指标名 + 最新值）
+  const lastBar = props.bars[props.bars.length - 1];
+  for (const panel of panels) {
+    const segs: Array<[string, string]> = [];
+    if (panel.key === 'volume' && lastBar) {
+      segs.push(['VOL', dim]);
+      segs.push([fmtBig(lastBar.vol), lastBar.close >= lastBar.open ? up.value : down.value]);
+    } else if (panel.key === 'macd' && props.indicators.macd) {
+      const m = props.indicators.macd;
+      const mv = lastVal(m.macd);
+      segs.push(['MACD(12,26,9)', dim]);
+      segs.push([`DIF:${fmt2(lastVal(m.dif))}`, '#f59e0b']);
+      segs.push([`DEA:${fmt2(lastVal(m.dea))}`, '#3b82f6']);
+      segs.push([`MACD:${fmt2(mv)}`, mv != null && mv >= 0 ? up.value : down.value]);
+    } else if (panel.key === 'kdj' && props.indicators.kdj) {
+      const k = props.indicators.kdj;
+      segs.push(['KDJ(9,3,3)', dim]);
+      segs.push([`K:${fmt2(lastVal(k.k))}`, '#f59e0b']);
+      segs.push([`D:${fmt2(lastVal(k.d))}`, '#3b82f6']);
+      segs.push([`J:${fmt2(lastVal(k.j))}`, '#a855f7']);
+    } else if (panel.key === 'rsi' && props.indicators.rsi) {
+      const r = props.indicators.rsi;
+      segs.push(['RSI(6,12,24)', dim]);
+      segs.push([`RSI6:${fmt2(lastVal(r.rsi6))}`, '#f59e0b']);
+      segs.push([`RSI12:${fmt2(lastVal(r.rsi12))}`, '#3b82f6']);
+      segs.push([`RSI24:${fmt2(lastVal(r.rsi24))}`, '#a855f7']);
+    } else if (panel.key === 'wr' && props.indicators.wr) {
+      const w = props.indicators.wr;
+      segs.push(['WR(10,6)', dim]);
+      segs.push([`WR10:${fmt2(lastVal(w.wr10))}`, '#f59e0b']);
+      segs.push([`WR6:${fmt2(lastVal(w.wr6))}`, '#3b82f6']);
+    } else if (panel.key === 'bias' && props.indicators.bias) {
+      const b = props.indicators.bias;
+      segs.push(['BIAS(6,12,24)', dim]);
+      segs.push([`BIAS6:${fmt2(lastVal(b.bias6))}`, '#f59e0b']);
+      segs.push([`BIAS12:${fmt2(lastVal(b.bias12))}`, '#3b82f6']);
+      segs.push([`BIAS24:${fmt2(lastVal(b.bias24))}`, '#a855f7']);
+    } else if (panel.key === 'obv' && props.indicators.obv) {
+      segs.push(['OBV', dim]);
+      segs.push([fmtBig(lastVal(props.indicators.obv.obv)), '#38bdf8']);
+    }
+    let px = 72;
+    for (const [text, color] of segs) {
+      graphic.push({
+        type: 'text',
+        left: px,
+        top: `${panel.top + 0.4}%`,
+        silent: true,
+        z: 300,
+        style: { text, fill: color, fontSize: 10, fontFamily: 'ui-monospace, monospace' },
+      });
+      px += text.length * 6.4 + 12;
+    }
+  }
+
+  // 画线工具渲染（数据坐标 → markLine/markArea/markPoint，缩放自动跟随）
+  const markLineData: Array<Record<string, unknown> | Array<Record<string, unknown>>> = [];
+  const markAreaData: Array<Array<Record<string, unknown>>> = [];
+  const markPointData: Array<Record<string, unknown>> = [];
+  for (const d of drawings.value) {
+    if (d.kind === 'trend') {
+      markLineData.push([{ coord: [d.x1, d.y1], value: '' }, { coord: [d.x2, d.y2] }]);
+    } else if (d.kind === 'hline') {
+      markLineData.push({ yAxis: d.y, value: d.y.toFixed(2), lineStyle: { color: '#f59e0b' } });
+    } else if (d.kind === 'rect') {
+      markAreaData.push([{ coord: [d.x1, d.y1] }, { coord: [d.x2, d.y2] }]);
+    } else if (d.kind === 'fib') {
+      const xa = Math.min(d.x1, d.x2);
+      const xb = Math.max(d.x1, d.x2);
+      for (const l of FIB_LEVELS) {
+        const yl = d.y1 + (d.y2 - d.y1) * l;
+        markLineData.push([
+          { coord: [xa, yl], value: `${(l * 100).toFixed(1)}% ${yl.toFixed(2)}` },
+          { coord: [xb, yl] },
+        ]);
+      }
+    } else if (d.kind === 'text') {
+      markPointData.push({
+        coord: [d.x, d.y],
+        symbol: 'circle',
+        symbolSize: 2,
+        itemStyle: { color: '#f59e0b' },
+        label: { show: true, formatter: d.text, position: 'top', color: '#f59e0b', fontSize: 11 },
+      });
+    }
+  }
+  series.push({
+    name: '_draw',
+    type: 'line',
+    data: [],
+    xAxisIndex: 0,
+    yAxisIndex: 1,
+    silent: true,
+    z: 100,
+    markLine: {
+      silent: true,
+      symbol: 'none',
+      animation: false,
+      lineStyle: { color: '#f59e0b', width: 1.2 },
+      label: { show: true, position: 'end', fontSize: 9, color: '#b45309', formatter: '{c}' },
+      data: markLineData,
+    },
+    markArea: {
+      silent: true,
+      animation: false,
+      itemStyle: { color: 'rgba(59,130,246,0.10)' },
+      data: markAreaData,
+    },
+    markPoint: { silent: true, animation: false, data: markPointData },
+  });
 
   return {
     animation: false,
-    legend: { data: legendData, top: 0, type: 'scroll' },
+    graphic,
     // 全局十字光标联动（主图/副图同步 snap 到同一根 K）
     axisPointer: {
-      link: subPanels.map((_, gi) => ({ xAxisIndex: gi })),
-      label: { backgroundColor: '#666', precision: 2 },
-      lineStyle: { color: '#888', width: 1, type: 'dashed' },
+      link: xAxes.map((_, i) => ({ xAxisIndex: i })),
+      label: { backgroundColor: '#5b6472', precision: 2 },
+      lineStyle: { color: '#8a93a3', width: 1, type: 'dashed' },
       snap: true,
       z: 100,
     },
@@ -340,26 +768,20 @@ const option = computed<EChartsCoreOption>(() => {
       trigger: 'axis',
       axisPointer: {
         type: 'cross',
-        crossStyle: { color: '#888', width: 1, type: 'dashed' },
-        label: {
-          backgroundColor: '#666',
-          borderColor: '#666',
-          color: '#fff',
-          precision: 2,
-        },
+        crossStyle: { color: '#8a93a3', width: 1, type: 'dashed' },
+        label: { backgroundColor: '#5b6472', borderColor: '#5b6472', color: '#fff', precision: 2 },
       },
       confine: true,
-      backgroundColor: 'rgba(255,255,255,0.95)',
-      borderColor: '#ddd',
+      backgroundColor: theme.value.tooltipBg,
+      borderColor: theme.value.tooltipBorder,
       borderWidth: 1,
-      textStyle: { color: '#222', fontSize: 12 },
-      formatter: (params: unknown) =>
-        formatTooltip(params as Array<Record<string, unknown>>),
+      textStyle: { color: theme.value.tooltipText, fontSize: 12 },
+      formatter: (params: unknown) => formatTooltip(params as Array<Record<string, unknown>>),
     },
     grid: grids,
     xAxis: xAxes,
     yAxis: yAxes,
-    // 缩放/拖动：滚轮缩放 + 拖拽平移，约束最小/最大可视根数避免过度拉伸
+    // 缩放/拖动：滚轮缩放 + 拖拽平移，约束最小/最大可视根数
     dataZoom: [
       {
         type: 'inside',
@@ -386,9 +808,13 @@ const option = computed<EChartsCoreOption>(() => {
         brushSelect: false,
         handleSize: '120%',
         showDetail: false,
-        dataBackground: { lineStyle: { color: '#bbb' }, areaStyle: { color: '#eef2ff' } },
-        fillerColor: 'rgba(47,111,237,0.12)',
-        selectedDataBackground: { lineStyle: { color: '#2f6fed' }, areaStyle: { color: 'rgba(47,111,237,0.1)' } },
+        borderColor: theme.value.split,
+        dataBackground: { lineStyle: { color: theme.value.zoomLine }, areaStyle: { color: theme.value.zoomArea } },
+        fillerColor: theme.value.zoomFiller,
+        selectedDataBackground: {
+          lineStyle: { color: theme.value.zoomLine },
+          areaStyle: { color: theme.value.zoomArea },
+        },
       },
     ],
     series,
@@ -405,14 +831,25 @@ function formatTooltip(params: Array<Record<string, unknown>>): string {
     `<b>${bar.datetime}</b>`,
     `开 ${bar.open.toFixed(2)} · 高 ${bar.high.toFixed(2)}`,
     `低 ${bar.low.toFixed(2)} · 收 ${bar.close.toFixed(2)}`,
-    `<span style="color:${chg >= 0 ? UP : DOWN}">涨跌 ${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%</span>`,
+    `<span style="color:${chg >= 0 ? up.value : down.value}">涨跌 ${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%</span>`,
     `量 ${fmtBig(bar.vol)} · 额 ${fmtBig(bar.amount)}`,
     `换手 ${bar.turnover > 0 ? `${(bar.turnover * 100).toFixed(2)}%` : '--'}`,
   ];
+  if (props.showMa) {
+    const maParts = props.maWindows
+      .map((w, i) => {
+        const arr = props.indicators[`ma${w}`] as (number | null)[] | undefined;
+        const v = arr?.[first.dataIndex];
+        if (v == null) return null;
+        return `<span style="color:${MA_COLORS[i % MA_COLORS.length]}">MA${w} ${v.toFixed(2)}</span>`;
+      })
+      .filter((s): s is string => s !== null);
+    if (maParts.length) lines.push(maParts.join(' '));
+  }
   return lines.join('<br/>');
 }
 </script>
 
 <template>
-  <EChart :option="option" :height="height" :reset-key="resetKey" />
+  <EChart :option="option" :height="height" :reset-key="resetKey" @ready="onChartReady" />
 </template>

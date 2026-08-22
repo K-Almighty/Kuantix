@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from typing import Any
 
 import pandas as pd
 import pytest
@@ -20,6 +21,7 @@ from Kuantix.analysis.stock_detail import (
     _resample_daily,
 )
 from Kuantix.core.contracts import Bar
+from Kuantix.core.fail_loud import DataIntegrityError, MissingKeyError
 from Kuantix.data.market_store import MinuteBar
 
 
@@ -531,3 +533,220 @@ class TestDailyQuote:
         # tdx 900 根末两根，而非本地 2 根假日线（10.5x）
         assert q["close"] == pytest.approx(10.5 + 899 * 0.01)
         assert q["prev_close"] == pytest.approx(10.5 + 898 * 0.01)
+
+
+# --------------------------------------------------------------------- #
+# 新周期：min1（当日分时）/ min30 / quarter（季K）
+# --------------------------------------------------------------------- #
+class TestNewPeriods:
+    def _svc_with_tdx_minute(self, rows, period_minutes):
+        fetcher = FakeTdxMinuteFetcher(rows)
+        store = FakeStore(_make_bars(10))
+        store.read_minute_bars = lambda *a, **k: []  # type: ignore[method-assign]
+        svc = StockDetailService(store=store, config=None)
+        svc._tdx_fetcher = fetcher  # type: ignore[assignment]
+        return svc, fetcher
+
+    def test_min1_keeps_only_last_trading_day(self):
+        """分时（min1）：tdx 回退后仅保留最近交易日（单日 240 根）。"""
+        rows = _tdx_minute_rows(720, period_minutes=1)  # 3 个交易日
+        svc, fetcher = self._svc_with_tdx_minute(rows, 1)
+        payload = svc.get_detail("600000", period="min1", limit=500)
+        assert fetcher.calls == [("CN", 1, 480)]
+        assert payload["available"] is True
+        dates = {b["date"] for b in payload["bars"]}
+        assert len(dates) == 1  # 只有一个交易日
+        assert len(payload["bars"]) == 240
+        # 分时图自带 VWAP 均价线（当日累计口径）
+        assert "vwap" in payload["indicators"]
+        assert payload["indicators"]["vwap"][-1] is not None
+
+    def test_min30_falls_back_to_tdx_30min(self):
+        """30 分钟周期：本地无数据 → tdx 拉 30 分钟档（480 根）。"""
+        rows = _tdx_minute_rows(480, period_minutes=30)
+        svc, fetcher = self._svc_with_tdx_minute(rows, 30)
+        payload = svc.get_detail("600000", period="min30", limit=500)
+        assert fetcher.calls == [("CN", 30, 480)]
+        assert payload["available"] is True
+        assert payload["period"] == "min30"
+        assert len(payload["bars"]) == 480
+
+    def test_min30_local_aggregation(self):
+        """本地 1 分钟线 → 30 分钟桶聚合（8 桶/日）。"""
+        rows = _tdx_minute_rows(240, period_minutes=1)  # 1 个交易日
+        store = FakeStore(_make_bars(10))
+        store.read_minute_bars = lambda *a, **k: rows  # type: ignore[method-assign]
+        svc = StockDetailService(store=store, config=None)
+        payload = svc.get_detail("600000", period="min30", limit=500)
+        assert payload["data_source"] == "lake"
+        assert len(payload["bars"]) == 8  # 240 分钟 / 30 = 8 桶
+        assert payload["bars"][0]["datetime"].endswith("09:30")
+
+    def test_quarter_resample_from_daily(self):
+        """季K：日线重采样按季度分桶，标签取桶内最后交易日。"""
+        store = FakeStore(_make_bars(365 * 2))  # 2020-01-01 起 2 年
+        svc = StockDetailService(store=store, config=None)
+        payload = svc.get_detail("600000", period="quarter", limit=50)
+        assert payload["available"] is True
+        # 2 年 → 最多 8 个季度桶
+        assert 2 <= len(payload["bars"]) <= 8
+        # 每根季K的量 = 桶内日线量之和（> 单根日线量 1000）
+        assert payload["bars"][0]["vol"] > 1000.0
+
+    def test_quarter_unavailable_rule_rejected(self):
+        svc = StockDetailService(store=FakeStore(_make_bars(10)), config=None)
+        with pytest.raises(MissingKeyError):
+            svc.get_detail("600000", period="minute")
+
+
+# --------------------------------------------------------------------- #
+# 复权（adjust：none/qfq/hfq）
+# --------------------------------------------------------------------- #
+class FakeAdjustTdxFetcher:
+    """复权拉取替身：记录 adjust 参数，返回预置复权日线。"""
+
+    def __init__(self, bars: list[Bar]) -> None:
+        self.bars = bars
+        self.adjust_calls: list[Any] = []
+
+    def fetch_kline(self, market, code, years=10, *, count=None, adjust=None, **kw):
+        self.adjust_calls.append(adjust)
+        return self.bars
+
+
+class TestAdjust:
+    def test_invalid_adjust_rejected(self):
+        svc = StockDetailService(store=FakeStore(_make_bars(10)), config=None)
+        with pytest.raises(MissingKeyError):
+            svc.get_detail("600000", period="day", adjust="xx")
+
+    def test_qfq_uses_tdx_only(self):
+        """前复权：绕过本地 lake，直接 tdx 在线拉取（本地无复权因子）。"""
+        fetcher = FakeAdjustTdxFetcher(_make_bars(900))
+        store = FakeStore(_make_bars(300))  # 本地数据充足也不读
+        svc = StockDetailService(store=store, config=None)
+        svc._tdx_fetcher = fetcher  # type: ignore[assignment]
+        payload = svc.get_detail("600000", period="day", limit=100, adjust="qfq")
+        assert len(fetcher.adjust_calls) == 1
+        assert payload["data_source"] == "tdx_realtime"
+        assert payload["adjust"] == "qfq"
+        assert store.read_calls == []  # 未读本地
+
+    def test_hfq_adjust_propagated(self):
+        fetcher = FakeAdjustTdxFetcher(_make_bars(900))
+        svc = StockDetailService(store=FakeStore(_make_bars(2)), config=None)
+        svc._tdx_fetcher = fetcher  # type: ignore[assignment]
+        payload = svc.get_detail("600000", period="week", limit=50, adjust="hfq")
+        assert payload["adjust"] == "hfq"
+        assert payload["available"] is True
+
+    def test_adjust_failure_raises(self):
+        """复权拉取失败 → 显式报错（不静默降级为不复权，防误导）。"""
+        class _Boom:
+            def fetch_kline(self, *a, **k):
+                raise RuntimeError("tdx down")
+
+        svc = StockDetailService(store=FakeStore(_make_bars(300)), config=None)
+        svc._tdx_fetcher = _Boom()  # type: ignore[assignment]
+        with pytest.raises(Exception, match="复权"):
+            svc.get_detail("600000", period="day", adjust="qfq")
+
+    def test_none_adjust_uses_local_lake(self):
+        """不复权（默认）：本地 lake 优先，正常路径不受影响。"""
+        store = FakeStore(_make_bars(300))
+        svc = StockDetailService(store=store, config=None)
+        payload = svc.get_detail("600000", period="day", limit=100)
+        assert payload["adjust"] == "none"
+        assert payload["data_source"] == "lake"
+
+
+# --------------------------------------------------------------------- #
+# 新指标集成（BOLL/ENE/SAR/WR/BIAS/OBV 经 get_detail 返回）
+# --------------------------------------------------------------------- #
+class TestIndicatorIntegration:
+    def test_all_new_indicators_returned(self):
+        store = FakeStore(_make_bars(300))
+        svc = StockDetailService(store=store, config=None)
+        payload = svc.get_detail(
+            "600000", period="day", limit=100,
+            indicators=["boll", "ene", "sar", "wr", "bias", "obv"],
+        )
+        ind = payload["indicators"]
+        assert set(ind) == {"boll", "ene", "sar", "wr", "bias", "obv"}
+        assert set(ind["boll"]) == {"upper", "mid", "lower"}
+        assert set(ind["ene"]) == {"upper", "ene", "lower"}
+        assert set(ind["sar"]) == {"sar"}
+        assert set(ind["wr"]) == {"wr6", "wr10"}
+        assert set(ind["bias"]) == {"bias6", "bias12", "bias24"}
+        assert set(ind["obv"]) == {"obv"}
+        # 序列长度与 bars 对齐
+        assert len(ind["boll"]["mid"]) == len(payload["bars"])
+
+    def test_default_indicators_include_new_ones(self):
+        store = FakeStore(_make_bars(300))
+        svc = StockDetailService(store=store, config=None)
+        payload = svc.get_detail("600000", period="day", limit=100)
+        for key in ("boll", "ene", "sar", "wr", "bias", "obv"):
+            assert key in payload["indicators"]
+
+
+# --------------------------------------------------------------------- #
+# 实时面板（盘口 / 逐笔 / 资金流）
+# --------------------------------------------------------------------- #
+class TestRealtimePanel:
+    def _svc(self, fetcher) -> StockDetailService:
+        store = FakeStore(_make_bars(10))
+        svc = StockDetailService(store=store, config=None)
+        svc._tdx_fetcher = fetcher  # type: ignore[assignment]
+        return svc
+
+    def test_order_book_delegates_to_fetcher(self):
+        expected = {
+            "code": "600000",
+            "price": 9.05,
+            "bids": [{"price": 9.04, "vol": 120.0}],
+            "asks": [{"price": 9.06, "vol": 80.0}],
+        }
+
+        class _F:
+            def fetch_order_book(self, market, code):
+                return expected
+
+        payload = self._svc(_F()).get_order_book("600000")
+        assert payload is expected
+
+    def test_transactions_delegates_with_count(self):
+        class _F:
+            def __init__(self):
+                self.calls: list[Any] = []
+
+            def fetch_transactions(self, market, code, *, count):
+                self.calls.append(count)
+                return {"date": "today", "items": []}
+
+        f = _F()
+        self._svc(f).get_transactions("600000", count=500)
+        assert f.calls == [500]
+
+    def test_capital_flow_delegates(self):
+        expected = {"main_net": -123.45}
+
+        class _F:
+            def fetch_capital_flow(self, market, code):
+                return expected
+
+        assert self._svc(_F()).get_capital_flow("600000") is expected
+
+    def test_no_config_raises_fail_loud(self):
+        """未注入 config 且无 fetcher → fail-loud，不静默返回空。"""
+        svc = StockDetailService(store=FakeStore(_make_bars(10)), config=None)
+        with pytest.raises(DataIntegrityError):
+            svc.get_order_book("600000")
+
+    def test_invalid_code_rejected(self):
+        class _F:
+            def fetch_order_book(self, *a, **k):
+                raise AssertionError("不应到达上游")
+
+        with pytest.raises(MissingKeyError):
+            self._svc(_F()).get_order_book("777777")

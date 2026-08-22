@@ -514,7 +514,7 @@ const healthLabel = computed(() => {
                     type="checkbox"
                     :checked="p.enabled === true"
                     :disabled="monitor.presetsLoading"
-                    @change="togglePreset(p.key)"
+                    @change="monitor.togglePreset(p.key)"
                   />
                   <span class="preset-slider"></span>
                   <span class="preset-switch-label">{{ p.enabled ? '开' : '关' }}</span>

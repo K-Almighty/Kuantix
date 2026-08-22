@@ -41,6 +41,7 @@ import type {
   Alert,
   AlertLevel,
   ChannelInfo,
+  PresetStatus,
   WsEnvelope,
 } from '../types/monitor';
 import type {
@@ -70,7 +71,7 @@ import type {
   TestConnectionResult,
 } from '../types/settings';
 import type { BacktestJobList, KlineWithSignals } from '../types/backtest';
-import type { StockDetail } from '../types/stock';
+import type { StockDetail, StockQuoteLite, StockOrderBook, StockTransactions, StockCapitalFlow } from '../types/stock';
 import type {
   NewsItem,
   FundamentalProfile,
@@ -136,7 +137,7 @@ export interface KuantixApi {
   postFactorReport(
     req: { name: string; market?: string; start?: string; end?: string },
   ): Promise<Envelope<Job>>;
-  postFactorCombine(req: CombineRequest): Promise<Envelope<FactorModel>>;
+  postFactorCombine(req: CombineRequest): Promise<Envelope<Job>>;
   getFactorModels(market?: string, page?: number, pageSize?: number): Promise<Envelope<Page<FactorModel>>>;
 
   /* -------- screen（S1–S6） -------- */
@@ -173,6 +174,8 @@ export interface KuantixApi {
     pageSize?: number;
   }): Promise<Envelope<Page<Alert>>>;
   getChannels(): Promise<Envelope<{ items: ChannelInfo[] }>>;
+  getPresets(): Promise<Envelope<PresetStatus[]>>;
+  togglePreset(key: string): Promise<Envelope<Rule>>;
   connectMonitorFeed(market?: string): MonitorFeed;
 
   /* -------- backtest（B1–B4，v1.2 增量） -------- */
@@ -207,11 +210,34 @@ export interface KuantixApi {
   ): Promise<Envelope<KlineWithSignals>>;
 
   /* -------- stock（个股详情：多周期 K 线 + 技术指标 + 核心数据，通达信风格） -------- */
-  /** 个股详情：period ∈ day|week|month|year|min5|min15；indicators 逗号分隔 ma,macd,kdj,rsi */
+  /** 个股详情：period ∈ min1..min60|day|week|month|quarter|year；adjust ∈ none|qfq|hfq；
+   *  indicators 逗号分隔 ma,boll,ene,sar,macd,kdj,rsi,wr,bias,obv；ma 自定义均线窗口 */
   getStockDetail(
     code: string,
-    opts?: { market?: string; period?: string; limit?: number; indicators?: string },
+    opts?: {
+      market?: string;
+      period?: string;
+      adjust?: string;
+      limit?: number;
+      indicators?: string;
+      ma?: string;
+    },
   ): Promise<Envelope<StockDetail>>;
+
+  /** 批量实时报价（自选股侧栏；codes ≤ 80 只） */
+  getStockQuotes(codes: string[], opts?: { market?: string }): Promise<Envelope<{ items: StockQuoteLite[] }>>;
+
+  /** 五档盘口 + 实时快照（tdx 在线直连） */
+  getStockOrderBook(code: string, opts?: { market?: string }): Promise<Envelope<StockOrderBook>>;
+
+  /** 当日逐笔成交明细（时间升序；bs: 0=买 1=卖 2=中性） */
+  getStockTransactions(
+    code: string,
+    opts?: { market?: string; count?: number },
+  ): Promise<Envelope<StockTransactions>>;
+
+  /** 资金流向（今日主力/散户净额 + 5 日大中小单净额，单位元） */
+  getStockCapitalFlow(code: string, opts?: { market?: string }): Promise<Envelope<StockCapitalFlow>>;
 
   /* -------- portfolio（P1–P3，v1.3 草案 P0：资金分仓组合回测） -------- */
   portfolioRun(req: PortfolioRunRequest): Promise<Envelope<Job>>;

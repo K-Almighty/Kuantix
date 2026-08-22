@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import pandas as pd
 from easy_tdx.mac.enums import Adjust, ExMarket, Period
 from easy_tdx.models.enums import Market
@@ -122,7 +123,9 @@ _PAGE_CAP: int = 700
 #: 分钟周期档位 → 上游 ``Period`` 枚举（``fetch_minute_kline`` 支持的档位）。
 _MINUTE_PERIODS: dict[int, Period] = {
     1: Period.MIN_1,
+    5: Period.MIN_5,
     15: Period.MIN_15,
+    30: Period.MIN_30,
     60: Period.MIN_60,
 }
 
@@ -447,7 +450,10 @@ class QuotationFetcher:
         expected = float(profile.lot_size) if route.divide_by_lot_size else 1.0
         ratios: list[float] = []
         for close, vol, amount in zip(
-            frame["close"].tolist(), frame["vol"].tolist(), frame["amount"].tolist()
+            frame["close"].tolist(),
+            frame["vol"].tolist(),
+            frame["amount"].tolist(),
+            strict=True,
         ):
             close_f, vol_f, amount_f = float(close), float(vol), float(amount)
             if close_f <= 0 or vol_f <= 0 or amount_f <= 0:
@@ -505,8 +511,6 @@ class QuotationFetcher:
         if not pairs:
             return []
 
-        profile = get_market_profile(route.market)
-        lot_size = self._vol_divisor(route, profile)
         client = self._mac_client()
         quotes: list[Quote] = []
         now = dt.datetime.now()
@@ -518,8 +522,269 @@ class QuotationFetcher:
                     f"[fail-loud/NF-1] get_stock_quotes 返回 {type(frame).__name__}，"
                     f"期望 DataFrame"
                 )
-            quotes.extend(self._frame_to_quotes(frame, now=now, vol_divisor=lot_size))
+            # 报价位图路径的 vol 原生即「手」（实测 amount/close/100 与
+            # raw vol 比值 0.996-0.999，600519/300750/000001 三标的复核）；
+            # RD-8 的 ÷100 只适用于 K 线路径，此处再除会小 100 倍。
+            quotes.extend(self._frame_to_quotes(frame, now=now, vol_divisor=1.0))
         return quotes
+
+    # ------------------------------------------------------------------ #
+    # 盘口 / 逐笔 / 资金流 / 个股快照（详情页实时面板）
+    # ------------------------------------------------------------------ #
+
+    def fetch_order_book(
+        self, market: str, code: str, *, exchange: str | None = None
+    ) -> dict[str, Any]:
+        """拉取五档盘口 + 实时快照（盘口走标准协议，基本面走扩展协议）。
+
+        五档盘口用标准协议 ``TdxClient.get_security_quotes``（原生 bid1-5 /
+        ask1-5 + 挂单量；扩展协议位图的 3-5 档字段 bit≥128 会溢出 32 位
+        位图，不可用）；PE/股本/换手等基本面字段用 ``MacClient`` COMMON
+        字段集补充，缺失不炸盘口。
+
+        Args:
+            market: 市场码（仅 CN）。
+            code: 证券代码。
+            exchange: 交易所前缀（sh/sz）；``None`` 按代码段推断（个股优先）。
+
+        Returns:
+            ``{code, name, price, prev_close, open, high, low, vol(手),
+            amount, bids: [{price, vol}...×5], asks: [...×5], 基本面字段...}``。
+            成交量与挂单量单位与通达信盘口一致（手；标准协议原生即手，
+            无需 RD-8 换算）。
+
+        Raises:
+            NotSupportedError: 非 CN 市场。
+            UpstreamContractError: 上游返回空或缺字段。
+        """
+        from easy_tdx.codec.bitmap import PresetField
+
+        route = self.route_for(market)
+        if route.market != "CN":
+            raise NotSupportedError(
+                f"[fail-loud/NF-5] 盘口数据目前仅支持 CN 市场，收到 {market!r}"
+            )
+        market_int = self._cn_market_int(exchange, str(code))
+        frame = self._tdx_client().get_security_quotes(
+            stocks=[(Market(market_int), str(code))]
+        )
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            raise UpstreamContractError(
+                f"[fail-loud/NF-1] get_security_quotes({code}) 盘口返回空"
+            )
+        row: dict[str, Any] = frame.iloc[0].to_dict()
+
+        def _num(key: str) -> float | None:
+            v = row.get(key)
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                return None
+            return float(v)
+
+        def _levels(prefix: str) -> list[dict[str, float]]:
+            out: list[dict[str, float]] = []
+            for i in range(1, 6):
+                price = _num(f"{prefix}{i}")
+                if price is not None and price > 0:
+                    out.append({"price": price, "vol": _num(f"{prefix}_vol{i}") or 0.0})
+            return out
+
+        fundamental_keys = (
+            "turnover",
+            "vol_ratio",
+            "pe_ttm",
+            "pe_dynamic",
+            "pe_static",
+            "eps",
+            "net_assets",
+            "dividend_yield",
+            "total_market_cap",
+            "total_shares",
+            "float_shares",
+            "main_net_amount",
+        )
+        payload: dict[str, Any] = {
+            "code": str(row.get("code", code)),
+            "name": str(row.get("name", "")),
+            "price": _num("price"),
+            "prev_close": _num("pre_close"),
+            "open": _num("open"),
+            "high": _num("high"),
+            "low": _num("low"),
+            "vol": _num("vol") or 0.0,
+            "amount": _num("amount"),
+            "inside_volume": _num("s_vol"),
+            "outside_volume": _num("b_vol"),
+            "bids": _levels("bid"),
+            "asks": _levels("ask"),
+        }
+        # 基本面字段：COMMON 尽力补充（失败置 None，不影响盘口主数据）
+        try:
+            common = self._mac_client().get_stock_quotes(
+                stocks=[(market_int, str(code))], fields=PresetField.COMMON
+            )
+            crow: dict[str, Any] = (
+                common.iloc[0].to_dict()
+                if isinstance(common, pd.DataFrame) and not common.empty
+                else {}
+            )
+        except Exception:  # noqa: BLE001 - 基本面缺字段不影响盘口展示
+            crow = {}
+        for key in fundamental_keys:
+            raw_key = "total_market_cap_ab" if key == "total_market_cap" else key
+            v = crow.get(raw_key)
+            payload[key] = (
+                None if v is None or (isinstance(v, float) and np.isnan(v)) else float(v)
+            )
+        return payload
+
+    def fetch_transactions(
+        self,
+        market: str,
+        code: str,
+        *,
+        count: int = 300,
+        exchange: str | None = None,
+        date: int | None = None,
+    ) -> dict[str, Any]:
+        """拉取逐笔成交（当日或指定日；时间升序）。
+
+        Args:
+            market: 市场码（仅 CN）。
+            code: 证券代码。
+            count: 拉取条数（上游自动分页）。
+            exchange: 交易所前缀；``None`` 按代码段推断。
+            date: ``YYYYMMDD``；``None`` 为当日。
+
+        Returns:
+            ``{date: 'YYYY-MM-DD'|'today', items: [{time, price, vol(手),
+            bs: 0买/1卖/2中性}]}``（items 按时间升序）。
+
+        Raises:
+            NotSupportedError: 非 CN 市场。
+        """
+        route = self.route_for(market)
+        profile = get_market_profile(route.market)
+        if route.market != "CN":
+            raise NotSupportedError(
+                f"[fail-loud/NF-5] 逐笔成交目前仅支持 CN 市场，收到 {market!r}"
+            )
+        market_int = self._cn_market_int(exchange, str(code))
+        frame = self._mac_client().get_transactions(
+            market=market_int, code=str(code), count=int(count), date=date
+        )
+        lot = float(profile.lot_size)
+        items: list[dict[str, Any]] = []
+        for record in frame.to_dict(orient="records"):
+            t = record.get("time")
+            items.append(
+                {
+                    "time": t.strftime("%H:%M:%S") if hasattr(t, "strftime") else str(t),
+                    "price": float(record.get("price", 0.0)),
+                    # pytdx 逐笔 vol 为股（RD-8 同源结论）→ 手
+                    "vol": float(record.get("vol", 0.0)) / lot,
+                    "bs": int(record.get("bs_flag", 2)),
+                }
+            )
+        return {
+            "date": f"{date // 10000:04d}-{date // 100 % 100:02d}-{date % 100:02d}"
+            if date
+            else "today",
+            "items": items,
+        }
+
+    def fetch_capital_flow(
+        self, market: str, code: str, *, exchange: str | None = None
+    ) -> dict[str, Any]:
+        """拉取个股资金流向（今日主力/散户 + 5 日大中小单净额）。
+
+        Args:
+            market: 市场码（仅 CN）。
+            code: 证券代码。
+            exchange: 交易所前缀；``None`` 按代码段推断。
+
+        Returns:
+            ``{main_in, main_out, main_net, small_in, small_out, small_net,
+            mid_net_5d, large_net_5d}``（单位：元）。
+
+        Raises:
+            NotSupportedError: 非 CN 市场。
+            UpstreamContractError: 上游返回空。
+        """
+        route = self.route_for(market)
+        if route.market != "CN":
+            raise NotSupportedError(
+                f"[fail-loud/NF-5] 资金流向目前仅支持 CN 市场，收到 {market!r}"
+            )
+        market_int = self._cn_market_int(exchange, str(code))
+        frame = self._mac_client().get_capital_flow(market=market_int, code=str(code))
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            raise UpstreamContractError(
+                f"[fail-loud/NF-1] get_capital_flow({code}) 返回空"
+            )
+        row = frame.iloc[0].to_dict()
+        return {
+            "main_in": float(row.get("main_in", 0.0)),
+            "main_out": float(row.get("main_out", 0.0)),
+            "main_net": float(row.get("main_net", 0.0)),
+            "small_in": float(row.get("small_in", 0.0)),
+            "small_out": float(row.get("small_out", 0.0)),
+            "small_net": float(row.get("small_net", 0.0)),
+            "mid_net_5d": float(row.get("mid_net", 0.0)),
+            "large_net_5d": float(row.get("large_net", 0.0)),
+        }
+
+    def fetch_symbol_snapshot(
+        self, market: str, code: str, *, exchange: str | None = None
+    ) -> dict[str, Any]:
+        """拉取个股简要特征快照（活跃度/内盘/外盘/均价/换手）。
+
+        Args:
+            market: 市场码（仅 CN）。
+            code: 证券代码。
+            exchange: 交易所前缀；``None`` 按代码段推断。
+
+        Returns:
+            ``{code, name, time, activity, pre_close, open, high, low, close,
+            vol(手), amount, inside_volume(手), outside_volume(手), turnover,
+            avg}``。
+
+        Raises:
+            NotSupportedError: 非 CN 市场。
+        """
+        route = self.route_for(market)
+        profile = get_market_profile(route.market)
+        if route.market != "CN":
+            raise NotSupportedError(
+                f"[fail-loud/NF-5] 个股快照目前仅支持 CN 市场，收到 {market!r}"
+            )
+        market_int = self._cn_market_int(exchange, str(code))
+        frame = self._mac_client().get_symbol_info(
+            market=market_int, code=str(code)
+        )
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            raise UpstreamContractError(
+                f"[fail-loud/NF-1] get_symbol_info({code}) 返回空"
+            )
+        row = frame.iloc[0].to_dict()
+        lot = float(profile.lot_size)
+        t = row.get("time")
+        return {
+            "code": str(row.get("code", code)),
+            "name": str(row.get("name", "")),
+            "time": t.isoformat(sep=" ") if hasattr(t, "isoformat") else None,
+            "activity": int(row.get("activity", 0)),
+            "pre_close": float(row.get("pre_close", 0.0)),
+            "open": float(row.get("open", 0.0)),
+            "high": float(row.get("high", 0.0)),
+            "low": float(row.get("low", 0.0)),
+            "close": float(row.get("close", 0.0)),
+            "vol": float(row.get("vol", 0.0)) / lot,
+            "amount": float(row.get("amount", 0.0)),
+            "inside_volume": float(row.get("inside_volume", 0.0)) / lot,
+            "outside_volume": float(row.get("outside_volume", 0.0)) / lot,
+            "turnover": float(row.get("turnover", 0.0)),
+            "avg": float(row.get("avg", 0.0)),
+        }
 
     # ------------------------------------------------------------------ #
     # 内部：上游调用
@@ -530,6 +795,12 @@ class QuotationFetcher:
         if self._shared:
             return self._factory.get_mac_client()
         return self._factory.new_mac_client()
+
+    def _tdx_client(self) -> Any:
+        """取标准协议客户端（五档盘口用；按 ``shared_connection`` 决定池化）。"""
+        if self._shared:
+            return self._factory.get_tdx_client()
+        return self._factory.new_tdx_client()
 
     def _mac_ex_client(self) -> Any:
         """取扩展市场客户端（按 ``shared_connection`` 决定是否池化）。"""
@@ -614,11 +885,36 @@ class QuotationFetcher:
     # ------------------------------------------------------------------ #
 
     @staticmethod
+    def cn_stock_exchange(code: str) -> str | None:
+        """个股优先的交易所推断（供详情页/自选股等「股票语境」使用）。
+
+        与 ``MarketProfile.exchange_for_code`` 的 vipdoc 语义不同：后者把
+        000xxx 判为沪市指数（sh000001=上证指数）；而个股语境下 000001 是
+        深市平安银行。本规则与 :meth:`_cn_market_int` 的代码段推断一致。
+
+        Args:
+            code: 证券代码（6 位数字，或带 sh/sz 前缀）。
+
+        Returns:
+            ``sh`` / ``sz``；无法识别返回 ``None``（调用方跳过该代码）。
+        """
+        raw = str(code).strip().lower()
+        for prefix in ("sh", "sz"):
+            if raw.startswith(prefix) and len(raw) == 8:
+                return prefix
+        head = raw[:2]
+        if head in ("60", "68", "51", "50", "52", "53", "55", "56", "58", "88", "99", "01"):
+            return "sh"
+        if head in ("00", "30", "39", "15", "16", "17", "18", "12", "13"):
+            return "sz"
+        return None
+
+    @staticmethod
     def _cn_market_int(exchange: str | None, code: str) -> int:
         """A 股交易所前缀 → 上游 ``Market`` 整数。
 
         Args:
-            exchange: ``sh`` / ``sz``；``None`` 时按代码段推断。
+            exchange: ``sh`` / ``sz``；``None`` 时按代码段推断（个股优先）。
             code: 证券代码。
 
         Returns:
@@ -637,10 +933,10 @@ class QuotationFetcher:
                 f"[fail-loud/NF-26] 不支持的交易所前缀 {exchange!r}（仅 sh/sz）。"
                 f"北交所 bj 不在 P0 范围，且会导致上游系数判定为 UNKNOWN"
             )
-        head = str(code).strip()[:2]
-        if head in ("60", "68", "51", "50", "52", "53", "55", "56", "58", "88", "99", "01"):
+        hint = QuotationFetcher.cn_stock_exchange(str(code))
+        if hint == "sh":
             return int(Market.SH)
-        if head in ("00", "30", "39", "15", "16", "17", "18", "12", "13"):
+        if hint == "sz":
             return int(Market.SZ)
         raise DataIntegrityError(
             f"[fail-loud/NF-26] 无法从代码 {code!r} 推断交易所，请显式传 exchange。"
@@ -964,7 +1260,8 @@ class QuotationFetcher:
                     last=last,
                     prev_close=prev_close,
                     change_pct=change_pct,
-                    # RD-8 同样适用于报价：在线 vol 为股，契约 Quote.vol 为手
+                    # vol_divisor 由调用方决定：报价位图路径原生即「手」传 1.0；
+                    # RD-8 的 ÷100 只适用于 K 线路径（fetch_kline 已单独处理）
                     vol=vol_shares / vol_divisor,
                     amount=amount,
                     ts=now,

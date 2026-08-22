@@ -42,6 +42,7 @@ import type {
   Alert,
   AlertLevel,
   ChannelInfo,
+  PresetStatus,
 } from '../types/monitor';
 import type {
   BacktestStrategySchema,
@@ -81,7 +82,13 @@ import type {
   NewsCategory,
   FundamentalGrade,
 } from '../types/analysis';
-import type { StockDetail } from '../types/stock';
+import type {
+  StockDetail,
+  StockQuoteLite,
+  StockOrderBook,
+  StockTransactions,
+  StockCapitalFlow,
+} from '../types/stock';
 import type { ExportPayload, MonitorFeed, KuantixApi } from './types';
 import { ApiError } from './types';
 import { RealMonitorFeed } from './ws';
@@ -506,15 +513,58 @@ export class RestApi implements KuantixApi {
   /* -------- stock（个股详情：多周期 K 线 + 技术指标，通达信风格） -------- */
   getStockDetail(
     code: string,
-    opts: { market?: string; period?: string; limit?: number; indicators?: string } = {},
+    opts: {
+      market?: string;
+      period?: string;
+      adjust?: string;
+      limit?: number;
+      indicators?: string;
+      ma?: string;
+    } = {},
   ): Promise<Envelope<StockDetail>> {
     return request<StockDetail>(`/stock/detail/${encodeURIComponent(code)}`, {
       query: {
         market: opts.market ?? 'CN',
         period: opts.period ?? 'day',
+        adjust: opts.adjust,
         limit: opts.limit,
         indicators: opts.indicators,
+        ma: opts.ma,
       },
+      toastOnError: false,
+    });
+  }
+
+  getStockQuotes(
+    codes: string[],
+    opts: { market?: string } = {},
+  ): Promise<Envelope<{ items: StockQuoteLite[] }>> {
+    return request<{ items: StockQuoteLite[] }>('/stock/quotes', {
+      query: { market: opts.market ?? 'CN', codes: codes.join(',') },
+      toastOnError: false,
+    });
+  }
+
+  getStockOrderBook(code: string, opts: { market?: string } = {}): Promise<Envelope<StockOrderBook>> {
+    return request<StockOrderBook>(`/stock/order-book/${encodeURIComponent(code)}`, {
+      query: { market: opts.market ?? 'CN' },
+      toastOnError: false,
+    });
+  }
+
+  getStockTransactions(
+    code: string,
+    opts: { market?: string; count?: number } = {},
+  ): Promise<Envelope<StockTransactions>> {
+    return request<StockTransactions>(`/stock/transactions/${encodeURIComponent(code)}`, {
+      query: { market: opts.market ?? 'CN', count: opts.count },
+      toastOnError: false,
+    });
+  }
+
+  getStockCapitalFlow(code: string, opts: { market?: string } = {}): Promise<Envelope<StockCapitalFlow>> {
+    return request<StockCapitalFlow>(`/stock/capital-flow/${encodeURIComponent(code)}`, {
+      query: { market: opts.market ?? 'CN' },
       toastOnError: false,
     });
   }

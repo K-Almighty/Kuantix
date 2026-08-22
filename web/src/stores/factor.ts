@@ -140,7 +140,7 @@ export const useFactorStore = defineStore('factor', {
             this.reportLoading = false;
             if (status === 'done' && env.data.result_summary) {
               this.report = env.data.result_summary as unknown as FactorReport;
-            } else if (status === 'error') {
+            } else if (status === 'failed') {
               const msg = env.data.error?.message ?? '报告生成失败';
               this.reportError = msg;
               // 无已计算数据 → 引导先 compute（问题 4），不裸报错

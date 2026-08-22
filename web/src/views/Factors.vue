@@ -394,7 +394,7 @@ onMounted(() => {
             <label class="checkbox-label">
               <input v-model="combineSave" type="checkbox" /> 保存模型
             </label>
-            <button class="btn btn-primary btn-sm" :disabled="factorStore.combineLoading || (factorStore.combineJob && ['queued','running'].includes(factorStore.combineJob.status))" @click="doCombine">
+            <button class="btn btn-primary btn-sm" :disabled="factorStore.combineLoading || !!(factorStore.combineJob && ['queued','running'].includes(factorStore.combineJob.status))" @click="doCombine">
               {{ (factorStore.combineJob && ['queued','running'].includes(factorStore.combineJob.status)) ? '合成中…' : '合成' }}
             </button>
           </div>

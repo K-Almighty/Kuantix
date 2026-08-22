@@ -10,6 +10,7 @@ import {
   DataZoomComponent,
   TitleComponent,
   MarkLineComponent,
+  MarkAreaComponent,
   MarkPointComponent,
   VisualMapComponent,
 } from 'echarts/components';
@@ -29,10 +30,16 @@ echarts.use([
   DataZoomComponent,
   TitleComponent,
   MarkLineComponent,
+  MarkAreaComponent,
   MarkPointComponent,
   VisualMapComponent,
   CanvasRenderer,
 ]);
+
+const emit = defineEmits<{
+  /** 图表实例就绪（画线工具等需要直接访问 zr 事件/坐标换算的场景） */
+  ready: [chart: ReturnType<typeof echarts.init>];
+}>();
 
 const props = withDefaults(
   defineProps<{
@@ -83,6 +90,7 @@ onMounted(() => {
   if (!el.value) return;
   chart.value = echarts.init(el.value);
   render();
+  emit('ready', chart.value);
   resizeObserver = new ResizeObserver(() => chart.value?.resize());
   resizeObserver.observe(el.value);
 });

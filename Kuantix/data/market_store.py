@@ -417,6 +417,29 @@ class MarketStore:
         name = str(row["name"])
         return name or None
 
+    def security_row(self, code: str, market: str = "CN") -> dict[str, Any] | None:
+        """按代码查证券完整行（含 exchange/security_type；未收录返回 ``None``）。
+
+        供个股详情判断行类型（A 股 / 指数 / 债券…）：securities 表主键
+        ``(market, code)`` 无交易所列，000001-000999 区间沪市指数行会覆盖
+        同代码深市股票行，调用方需按 security_type 决定是否信任该行。
+
+        Args:
+            code: 证券代码。
+            market: 市场码。
+
+        Returns:
+            ``{code, name, exchange, security_type}``；未找到返回 ``None``。
+        """
+        # 读路径不加锁（R2）
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT code, name, exchange, security_type FROM securities "
+                "WHERE market = ? AND code = ?",
+                (str(market).upper(), str(code)),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def securities_count(self, market: str | None = None) -> int:
         """证券清单条数（状态展示用）。"""
         # 读路径不加锁（R2）
