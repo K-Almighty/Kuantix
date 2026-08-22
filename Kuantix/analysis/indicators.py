@@ -18,6 +18,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 import pandas as pd
 
@@ -103,7 +105,7 @@ def kdj(
     RSV 初值缺失段置 ``nan``；K/D 以 50 为初值递推（通达信默认）。
     """
     h = _as_float_array(highs)
-    l = _as_float_array(lows)
+    low = _as_float_array(lows)
     c = _as_float_array(closes)
     size = len(c)
     out_none: list[float | None] = [None] * size
@@ -112,7 +114,7 @@ def kdj(
 
     # 滚动 9 日最高/最低
     hh = pd.Series(h).rolling(n, min_periods=n).max().to_numpy()
-    ll = pd.Series(l).rolling(n, min_periods=n).min().to_numpy()
+    ll = pd.Series(low).rolling(n, min_periods=n).min().to_numpy()
     with np.errstate(divide="ignore", invalid="ignore"):
         rsv = np.where((hh - ll) == 0, 50.0, (c - ll) / (hh - ll) * 100.0)
     rsv = np.where(np.isnan(hh), np.nan, rsv)
@@ -171,8 +173,9 @@ def rsi(
         for i in range(w + 1, size):
             avg_gain[i] = (avg_gain[i - 1] * (w - 1) + gains[i]) / w
             avg_loss[i] = (avg_loss[i - 1] * (w - 1) + losses[i]) / w
-        rs = np.where(avg_loss == 0, np.inf, avg_gain / avg_loss)
-        rsi_vals = np.where(avg_loss == 0, 100.0, 100.0 - 100.0 / (1.0 + rs))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rs = np.where(avg_loss == 0, np.inf, avg_gain / avg_loss)
+            rsi_vals = np.where(avg_loss == 0, 100.0, 100.0 - 100.0 / (1.0 + rs))
         result[f"rsi{w}"] = [
             None if np.isnan(v) else round(float(v), 4) for v in rsi_vals
         ]

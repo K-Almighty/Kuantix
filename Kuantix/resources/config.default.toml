@@ -1,0 +1,179 @@
+# =============================================================================
+# Kuantix 配置模板
+#
+# 加载顺序（Kuantix/config.py）：
+#   1. 本文件（或 Kuantix_CONFIG 指定的路径）
+#   2. 环境变量覆盖：Kuantix__<SECTION>__<KEY>（双下划线分隔，大小写不敏感）
+#      例：Kuantix__SERVER__PORT=9001
+#          Kuantix__PATHS__ROOT=/tmp/Kuantix
+#          Kuantix__MARKETS__HK_ENABLED=false
+#
+# 红线（NF-26 fail-loud）：本文件中**不存在**的键，读取时直接报错，
+# 代码中不做 `dict.get(key, 默认值)` 兜底。缺配置就是配置错误，必须显式修。
+# =============================================================================
+
+[app]
+name = "Kuantix"
+version = "0.1.0"
+# 日志级别：DEBUG / INFO / WARNING / ERROR
+log_level = "INFO"
+
+# -----------------------------------------------------------------------------
+# 数据落盘根目录（NF-15/NF-18，P0 修复：子路径可省略，默认 root/<name> 派生）
+# 必须与 ~/.easy_tdx/ 完全隔离：Kuantix 绝不写入上游目录。
+#
+#   - root  ：必须显式填写，其余 6 个字段均可省略
+#   - vipdoc / factors / db / logs / reports / exports：
+#         省略时自动派生为  root/<字段名>
+#         显式填写则使用原值（允许指向 root 之外，例如把 db 挂到独立 SSD）
+#   - 所有路径支持 ~ 展开，加载时统一 expanduser() + resolve()
+# -----------------------------------------------------------------------------
+[paths]
+root = "~/.Kuantix"
+vipdoc = "~/.Kuantix/vipdoc"
+factors = "~/.Kuantix/factors"
+db = "~/.Kuantix/db"
+logs = "~/.Kuantix/logs"
+reports = "~/.Kuantix/reports"
+exports = "~/.Kuantix/exports"
+
+# -----------------------------------------------------------------------------
+# REST 服务（Kuantix serve）
+# -----------------------------------------------------------------------------
+[server]
+host = "127.0.0.1"
+port = 8899
+reload = true
+# CORS 白名单（前端 Vite dev server）
+cors_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+# -----------------------------------------------------------------------------
+# 上游 TDX 行情服务器（NF-1 / NF-20）
+#   - 绝不调用 from_best_host()：它会改写 ~/.easy_tdx/config.json。
+#   - use_easy_tdx_known_hosts=true 时**只读**加载 ~/\.easy_tdx/config.json
+#     中已测速的节点列表作为补充候选，永不写回。
+#   - 自给自足部署：若本机/容器没有 ~/\.easy_tdx/config.json（那是另一个项目
+#     easy-tdx 的目录），会自动回退到项目内置兜底节点清单
+#     Kuantix/resources/easy_tdx_config.json（已随镜像打包），不再报错、不依赖外部项目。
+#     覆盖优先级：环境变量 Kuantix__TDX__KNOWN_HOSTS_PATH > 用户主目录 > 内置兜底。
+# -----------------------------------------------------------------------------
+[tdx]
+use_easy_tdx_known_hosts = true
+# A 股标准行情端口（TdxClient / MacClient）
+port = 7709
+# 港美股扩展行情端口（MacExClient）
+ex_port = 7727
+timeout_seconds = 15.0
+# 显式兜底节点（当 ~/.easy_tdx/config.json 不可用时使用；至少填一个）
+mac_hosts = ["123.60.47.136", "121.36.248.138"]
+std_hosts = ["180.153.18.170", "119.147.212.81"]
+mac_ex_hosts = ["116.205.135.205", "121.37.232.167"]
+
+# -----------------------------------------------------------------------------
+# 数据回补（NF-24 / NF-28）
+# -----------------------------------------------------------------------------
+[sync]
+# 并发 worker 数（回补链路）
+workers = 4
+# 单标的默认回溯年数
+default_years = 10
+# 每页证券列表条数（get_security_list 上游单页上限 1000）
+page_size = 1000
+# 请求限速：相邻请求最小间隔（秒），防服务端限流（S2 实测被限流挂起）
+min_request_interval = 0.05
+# 失败退避：初始秒数与最大重试次数
+retry_backoff_seconds = 1.0
+retry_max_attempts = 3
+# 写盘后回读校验的末尾条数（NF-27）
+verify_tail_bars = 5
+# 回读价格容差（NF-27）
+verify_price_tolerance = 0.001
+# 盘后自动增量调度开关（serve 启动时挂载；测试环境建议置 false 保证零网络）
+schedule_enabled = true
+# 每日盘后触发时间（HH:MM，Asia/Shanghai；交易日/时段由 MarketProfile 精确判定）
+schedule_time = "16:30"
+# 服务启动时是否执行幂等启动检查（湖非空且上次同步<今日才增量；空湖跳过不自动全量）
+schedule_startup_check = true
+# 盘中分钟线增量同步开关（默认关闭；需先在 DataLake 接入分钟线抓取源才生效）
+intraday_enabled = false
+# 盘中分钟线同步间隔（分钟，1-59，仅 intraday_enabled=true 时生效）
+intraday_interval_minutes = 5
+
+# -----------------------------------------------------------------------------
+# 实时监控（NF-28：与回补链路使用独立连接，交易时段禁全量回补）
+# -----------------------------------------------------------------------------
+[monitor]
+# 轮询间隔（秒）
+poll_interval_seconds = 5.0
+# 单次批量报价上限（上游协议限制 80）
+batch_size = 80
+# 同一规则告警冷却（秒），防刷屏
+alert_cooldown_seconds = 300.0
+# 仅在交易时段轮询（由 MarketProfile 判定）
+trading_hours_only = true
+# Webhook 推送地址（留空 = 不启用 webhook 通道；非空则告警 POST 到此 URL）
+webhook_url = ""
+
+# -----------------------------------------------------------------------------
+# 市场开关（NF-5 / NF-7）
+# 港美股 P0 仅接口占位，enabled=false；置 true 会在调用时显式抛
+# NotImplementedError，不做静默降级。
+# -----------------------------------------------------------------------------
+[markets]
+default = "CN"
+cn_enabled = true
+hk_enabled = false
+us_enabled = false
+
+# -----------------------------------------------------------------------------
+# 因子库（L2）
+# -----------------------------------------------------------------------------
+[factor]
+# Parquet 分区粒度：year
+partition = "year"
+# 前瞻收益周期（交易日）
+forward_period = 5
+# 分层回测层数
+quantiles = 5
+
+# -----------------------------------------------------------------------------
+# 选股
+# -----------------------------------------------------------------------------
+[screen]
+top_n = 50
+
+# -----------------------------------------------------------------------------
+# 行情主存储（设计文档 08：SQLite market.db 解耦）
+# -----------------------------------------------------------------------------
+[storage]
+# 行情主库文件名（位于 [paths].db 下）
+market_db = "market.db"
+# 二进制 vipdoc 是否保留为可选镜像（D1）。默认 false —— SQLite market.db 是
+# 唯一行情主存储，同步直接写 SQLite、不默认双写镜像；置 true 时额外镜像双写
+# （上游 SignalScanner / StrengthRanker 只认文件系统，需改造 scan_signals /
+# strength_rank 桥内编排后按需开启，P2）。
+vipdoc_mirror = false
+# 启动时是否自动执行 data migrate（D3）。默认 false —— 迁移是显式一次性操作
+# （Kuantix data migrate），启动只警告不自动。
+migrate_on_startup = false
+# 迁移/写侧单事务批大小（T05 性能，迁移期配合 PRAGMA synchronous=OFF 使用）
+write_batch_size = 2000
+
+# -----------------------------------------------------------------------------
+# 盘前分析 / 盘后复盘（设计文档 10）
+# -----------------------------------------------------------------------------
+[analysis]
+# 盘前分析 cron 触发时间（Asia/Shanghai，交易日）：保证开盘前就绪
+pre_open_time = "08:30"
+# 盘后分析 cron 触发时间（收盘后 20 分钟起，允许 lake 先增量）
+post_close_time = "15:20"
+# 盘后分析等待湖内当日 K 线就绪的兜底截止时间（超过即 fail-loud）
+post_close_wait_until = "16:00"
+# scan_technical 默认抽样标的数（0 = 全市场全部标的，确保无遗漏；允许 CLI/API 显式传 codes 覆盖）
+scan_sample_size = 0
+# scan_technical 并发 worker 数（全市场扫描时建议 16-32；1-64）
+scan_workers = 16
+# 消息面 provider：目前仅实现 local_json（示例），后续可注入 eastmoney / 巨潮 等
+news_provider = "local_json"
+# 本地示例消息面样本目录（缺省时自动派生为 [paths].reports / "news-samples"）
+news_path = "~/.Kuantix/reports/news-samples"

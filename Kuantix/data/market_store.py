@@ -551,6 +551,19 @@ class MarketStore:
                 rows = rows[::-1]
         return [self._row_to_bar(row) for row in rows]
 
+    def first_daily_date(self, market: str, code: str) -> int | None:
+        """取一只标的首个交易日（YYYYMMDD 整数；无数据返回 None）。
+
+        O(1) ``MIN(date)`` 聚合查询（主键最左前缀即可定位），供上市日期
+        等展示用途使用，避免为取首根而全量读取该标的全部历史。
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT MIN(date) FROM daily_bars WHERE market = ? AND code = ?",
+                (str(market), str(code)),
+            ).fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
     # ------------------------------------------------------------------ #
     # 分钟线存储（按分区文件，避免单文件过大，F1 存储侧）
     # ------------------------------------------------------------------ #

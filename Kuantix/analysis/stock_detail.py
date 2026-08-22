@@ -24,10 +24,9 @@ import datetime as dt
 from collections.abc import Sequence
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
-from Kuantix.analysis.indicators import INDICATOR_NAMES, kdj, macd, ma, rsi
+from Kuantix.analysis.indicators import INDICATOR_NAMES, kdj, ma, macd, rsi
 from Kuantix.core.fail_loud import DataIntegrityError, MissingKeyError
 from Kuantix.core.market import get_market_profile
 from Kuantix.data.market_store import MarketStore, MinuteBar
@@ -59,9 +58,24 @@ def _resample_daily(
     """对日线 DataFrame 按 ``rule`` 重采样（week/month/year）。
 
     重采样聚合：open=首、close=末、high=最大、low=最小、vol/amount=求和。
+
+    与 ``pandas.resample`` 的差异（通达信口径）：
+    - 周桶按**周五对齐**（W-FRI），而非默认 W-SUN——避免周五交易日的
+      周K横轴显示成周日；
+    - 桶标签取**桶内最后一个实际交易日**（节假日停牌时显示节前最后
+      交易日），不显示自然周末/月末等非交易日。
+
     返回升序、截断到最近 ``limit`` 根。
     """
     df = frame.set_index("datetime").sort_index()
+    if rule == "W-FRI":
+        keys = df.index + pd.to_timedelta((4 - df.index.weekday) % 7, unit="D")
+    elif rule == "ME":
+        keys = df.index.to_period("M").to_timestamp("M")
+    elif rule == "YE":
+        keys = df.index.to_period("Y").to_timestamp("Y")
+    else:
+        raise ValueError(f"不支持的重采样周期: {rule!r}")
     agg = {
         "open": "first",
         "high": "max",
@@ -70,10 +84,12 @@ def _resample_daily(
         "vol": "sum",
         "amount": "sum",
     }
-    rs = df.resample(rule).agg(agg).dropna(subset=["close"])
+    grouped = df.groupby(keys)
+    rs = grouped.agg(agg)
+    # 桶标签 = 桶内最后交易日（groupby 迭代序与 agg 行序一致，均为键升序）
+    rs.index = pd.DatetimeIndex([sub.index.max() for _, sub in grouped])
+    rs = rs.dropna(subset=["close"])
     rs = rs.reset_index().rename(columns={"index": "datetime"})
-    # 重采样后 datetime 是 Period/Timestamp，统一为日期
-    rs["datetime"] = pd.to_datetime(rs["datetime"])
     if limit and len(rs) > limit:
         rs = rs.tail(limit)
     return rs.reset_index(drop=True)
@@ -124,16 +140,23 @@ class StockDetailService:
     def _listing_date(self, market: str, code: str) -> str | None:
         """取上市日期（lake 日线首根日期；缺失返回 None，前端按默认区间处理）。
 
+        经 :meth:`MarketStore.first_daily_date` 的 O(1) ``MIN(date)`` 聚合
+        查询获取，避免为取首根而把该标的全部历史读进内存。
+
         本地无日线（如纯 tdx 回退标的）时返回 None，由前端退化到固定区间，
         不编造上市日期（fail-loud/不误导）。
         """
+        getter = getattr(self._store, "first_daily_date", None)
+        if getter is None:
+            return None
         try:
-            bars = self._store.read_daily_bars(market, code)
-            if bars:
-                return str(bars[0].date)
+            first = getter(market, code)
         except Exception:  # noqa: BLE001 - 上市日期缺失不影响行情展示
-            pass
-        return None
+            return None
+        if first is None:
+            return None
+        s = str(int(first))
+        return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
 
     # ------------------------------------------------------------------ #
     # 主入口
@@ -187,7 +210,14 @@ class StockDetailService:
         limit: int,
         indicators: Sequence[str],
     ) -> dict[str, Any]:
-        bars = self._store.read_daily_bars(market, code)
+        if period == "day":
+            # 日K只需末尾 limit 根 + 指标预热（MA60/MACD(26,9)/RSI24 约需
+            # 80 根历史）；SQL 反向取尾，避免全历史数千根读入内存
+            bars = self._store.read_daily_bars(
+                market, code, tail=int(limit) + 80
+            )
+        else:
+            bars = self._store.read_daily_bars(market, code)
         data_source = "lake"
         if not bars:
             # 本地无日线 → 回退 tdx 实时拉取（顶部搜索任意代码可进详情页），
@@ -213,7 +243,7 @@ class StockDetailService:
         if period == "day":
             rs = frame
         elif period == "week":
-            rs = _resample_daily(frame, "W", limit)
+            rs = _resample_daily(frame, "W-FRI", limit)
         elif period == "month":
             rs = _resample_daily(frame, "ME", limit)
         else:  # year
@@ -425,24 +455,26 @@ class StockDetailService:
         """按分钟桶聚合 1 分钟线（open=首、close=末、high=max、low=min）。
 
         bucket 支持 ``15min`` / ``60min``（其他值原样返回，不聚合）。
+        桶边界按「当日累计分钟数对齐」：如 09:35 → 15min 桶 09:30、
+        13:47 → 60min 桶 13:00（交易时段自然分桶，不复用小时取整）。
         """
         if bucket not in ("15min", "60min") or not rows:
             return rows
         step = 15 if bucket == "15min" else 60
         buckets: dict[tuple[int, int], list[MinuteBar]] = {}
         for r in rows:
-            hh = r.time // 100
-            bucket_start = (hh // step) * step
+            minutes = (r.time // 100) * 60 + (r.time % 100)
+            bucket_start = (minutes // step) * step
             key = (r.date, bucket_start)
             buckets.setdefault(key, []).append(r)
         out: list[MinuteBar] = []
-        for (date, hh), grp in sorted(buckets.items()):
+        for (date, start_min), grp in sorted(buckets.items()):
             out.append(
                 MinuteBar(
                     market=grp[0].market,
                     code=grp[0].code,
                     date=date,
-                    time=hh * 100,
+                    time=(start_min // 60) * 100 + (start_min % 60),
                     open=grp[0].open,
                     high=max(g.high for g in grp),
                     low=min(g.low for g in grp),

@@ -52,6 +52,15 @@ export function fmtDate(date: string | null | undefined): string {
   return date;
 }
 
+/** 大数值人性化：≥1亿 → x.xx 亿，≥1万 → x.xx 万（成交量/成交额展示） */
+export function fmtBig(v: number | null | undefined, digits = 2): string {
+  if (isNil(v) || Number.isNaN(v)) return '-';
+  const abs = Math.abs(v);
+  if (abs >= 1e8) return `${(v / 1e8).toFixed(digits)} 亿`;
+  if (abs >= 1e4) return `${(v / 1e4).toFixed(digits)} 万`;
+  return v.toLocaleString('zh-CN');
+}
+
 export function fmtBytes(n: number | null | undefined): string {
   if (isNil(n) || Number.isNaN(n)) return '-';
   const gb = n / 1024 / 1024 / 1024;

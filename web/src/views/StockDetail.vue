@@ -2,14 +2,18 @@
 /**
  * 个股详情页 /stock/:code（通达信风格）。
  * - 顶部：代码 + 名称 + 最新价 + 涨跌额/幅 + 今开/昨收/最高/最低/换手率
- * - 周期切换：日K / 周K / 月K / 年K / 60分钟 / 15分钟 / 5日
- * - 指标开关：MA / 成交量 / MACD / KDJ / RSI
+ * - 周期切换：日K / 周K / 月K / 年K / 60分钟 / 15分钟 / 分时
+ *   （周期同步 URL query 并记忆，刷新/分享不丢状态）
+ * - 指标开关：MA / 成交量 / MACD / KDJ / RSI（localStorage 记忆，
+ *   切换不重置图表缩放）
  * - 主图 K 线 + 指标叠加（StockKlineChart）
+ * - 请求带竞态保护：快速切换周期时丢弃过期响应
  */
 import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { api } from '../api';
 import type { Period, StockDetail as StockDetailData } from '../types';
+import { fmtBig } from '../utils/format';
 import StockKlineChart from '../components/StockKlineChart.vue';
 import StateBlock from '../components/StateBlock.vue';
 
@@ -19,6 +23,8 @@ const router = useRouter();
 const code = computed(() => String(route.params.code || ''));
 const name = computed(() => String(route.query.name || detail.value?.name || code.value));
 
+const LS_KEY = 'kuantix.stock';
+
 const PERIODS: Array<{ key: Period; label: string }> = [
   { key: 'day', label: '日K' },
   { key: 'week', label: '周K' },
@@ -26,24 +32,42 @@ const PERIODS: Array<{ key: Period; label: string }> = [
   { key: 'year', label: '年K' },
   { key: 'min60', label: '60分钟' },
   { key: 'min15', label: '15分钟' },
-  { key: 'min5', label: '5日' },
+  { key: 'min5', label: '分时' },
 ];
 
-/** 上市日期（后端自 lake 日线首根提取；用于图表动态起点与工具栏展示） */
-const listingDate = computed(() => detail.value?.listing_date ?? '');
+function isPeriod(v: unknown): v is Period {
+  return typeof v === 'string' && PERIODS.some((p) => p.key === v);
+}
 
-const period = ref<Period>('day');
+/** 初始化周期：URL query 优先（可分享/刷新保持）> localStorage > 默认日K */
+function initPeriod(): Period {
+  if (isPeriod(route.query.period)) return route.query.period;
+  const saved = localStorage.getItem(`${LS_KEY}.period`);
+  if (isPeriod(saved)) return saved;
+  return 'day';
+}
+
+/** 初始化持久化开关（localStorage 记忆用户偏好，缺省用默认值） */
+function persistedFlag(key: string, def: boolean) {
+  const raw = localStorage.getItem(`${LS_KEY}.${key}`);
+  return ref(raw === null ? def : raw === '1');
+}
+
+const period = ref<Period>(initPeriod());
 const detail = ref<StockDetailData | null>(null);
 const loading = ref(false);
 const error = ref('');
 const notFound = ref(false);
 
-// 指标开关
-const showMa = ref(true);
-const showVolume = ref(true);
-const showMacd = ref(true);
-const showKdj = ref(false);
-const showRsi = ref(false);
+/** 上市日期（后端自 lake 日线首根提取；用于图表动态起点与工具栏展示） */
+const listingDate = computed(() => detail.value?.listing_date ?? '');
+
+// 指标开关（刷新后保持用户上次选择）
+const showMa = persistedFlag('showMa', true);
+const showVolume = persistedFlag('showVolume', true);
+const showMacd = persistedFlag('showMacd', true);
+const showKdj = persistedFlag('showKdj', false);
+const showRsi = persistedFlag('showRsi', false);
 
 const UP = '#ef4444';
 const DOWN = '#22c55e';
@@ -71,8 +95,12 @@ const color = computed(() => {
   return change.value.abs >= 0 ? UP : DOWN;
 });
 
+/** 请求序号：快速切换周期/标的时丢弃过期响应，防止旧数据覆盖新数据 */
+let loadSeq = 0;
+
 async function load(): Promise<void> {
   if (!code.value) return;
+  const seq = ++loadSeq;
   loading.value = true;
   error.value = '';
   notFound.value = false;
@@ -83,6 +111,7 @@ async function load(): Promise<void> {
       limit: 600,
       indicators: 'ma,macd,kdj,rsi',
     });
+    if (seq !== loadSeq) return;
     const d = env.data;
     if (!d.available || d.bars.length === 0) {
       notFound.value = true;
@@ -91,16 +120,28 @@ async function load(): Promise<void> {
     }
     detail.value = d;
   } catch (e) {
+    if (seq !== loadSeq) return;
     error.value = e instanceof Error ? e.message : String(e);
   } finally {
-    loading.value = false;
+    if (seq === loadSeq) loading.value = false;
   }
 }
 
-function switchPeriod(p: Period): void {
-  period.value = p;
+// 周期变化：持久化 + 同步到 URL query（刷新/分享不丢状态）+ 重新加载
+watch(period, (p) => {
+  localStorage.setItem(`${LS_KEY}.period`, p);
+  void router.replace({ query: { ...route.query, period: p } });
   void load();
-}
+});
+
+// 指标开关变化：持久化（无需重新请求，图表组件本地响应）
+watch([showMa, showVolume, showMacd, showKdj, showRsi], ([ma, vol, macd, kdj, rsi]) => {
+  localStorage.setItem(`${LS_KEY}.showMa`, ma ? '1' : '0');
+  localStorage.setItem(`${LS_KEY}.showVolume`, vol ? '1' : '0');
+  localStorage.setItem(`${LS_KEY}.showMacd`, macd ? '1' : '0');
+  localStorage.setItem(`${LS_KEY}.showKdj`, kdj ? '1' : '0');
+  localStorage.setItem(`${LS_KEY}.showRsi`, rsi ? '1' : '0');
+});
 
 function goBack(): void {
   router.back();
@@ -139,13 +180,16 @@ watch(code, () => void load());
           <div><label>昨收</label><span>{{ prevClose?.toFixed(2) }}</span></div>
           <div><label>最高</label><span :style="{ color: UP }">{{ last.high.toFixed(2) }}</span></div>
           <div><label>最低</label><span :style="{ color: DOWN }">{{ last.low.toFixed(2) }}</span></div>
-          <div><label>成交量</label><span>{{ last.vol.toLocaleString('zh-CN') }}</span></div>
-          <div><label>成交额</label><span>{{ last.amount.toLocaleString('zh-CN') }}</span></div>
+          <div><label>成交量</label><span>{{ fmtBig(last.vol) }}</span></div>
+          <div><label>成交额</label><span>{{ fmtBig(last.amount) }}</span></div>
           <div>
             <label>换手率</label>
             <span>
-              {{ (last.turnover * 100).toFixed(2) }}%
-              <em v-if="detail?.turnover_estimated" class="sd-est">估</em>
+              <template v-if="last.turnover > 0">
+                {{ (last.turnover * 100).toFixed(2) }}%
+                <em v-if="detail?.turnover_estimated" class="sd-est">估</em>
+              </template>
+              <template v-else>--</template>
             </span>
           </div>
         </div>
@@ -160,7 +204,7 @@ watch(code, () => void load());
           :key="p.key"
           class="period-btn"
           :class="{ active: period === p.key }"
-          @click="switchPeriod(p.key)"
+          @click="period = p.key"
         >
           {{ p.label }}
         </button>

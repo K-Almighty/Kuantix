@@ -10,6 +10,7 @@
 import { computed } from 'vue';
 import type { EChartsCoreOption } from 'echarts/core';
 import type { StockBar, StockIndicators } from '../types';
+import { fmtBig } from '../utils/format';
 import EChart from './EChart.vue';
 
 const props = withDefaults(
@@ -57,6 +58,14 @@ const DOWN = '#22c55e'; // 跌（绿）
 const dates = computed(() => props.bars.map((b) => b.datetime));
 const candles = computed(() =>
   props.bars.map((b) => [b.open, b.close, b.low, b.high]),
+);
+
+/** 数据集标识：长度 + 首末时间。变化（切换周期/标的）时重置缩放，仅开关指标时保留缩放 */
+const resetKey = computed(
+  () =>
+    `${props.bars.length}:${props.bars[0]?.datetime ?? ''}:${
+      props.bars[props.bars.length - 1]?.datetime ?? ''
+    }`,
 );
 
 function volColor(bar: StockBar): string {
@@ -350,13 +359,13 @@ function formatTooltip(params: Array<Record<string, unknown>>): string {
     `开 ${bar.open.toFixed(2)} · 高 ${bar.high.toFixed(2)}`,
     `低 ${bar.low.toFixed(2)} · 收 ${bar.close.toFixed(2)}`,
     `<span style="color:${chg >= 0 ? UP : DOWN}">涨跌 ${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%</span>`,
-    `量 ${bar.vol.toLocaleString('zh-CN')} · 额 ${bar.amount.toLocaleString('zh-CN')}`,
-    `换手 ${(bar.turnover * 100).toFixed(2)}%`,
+    `量 ${fmtBig(bar.vol)} · 额 ${fmtBig(bar.amount)}`,
+    `换手 ${bar.turnover > 0 ? `${(bar.turnover * 100).toFixed(2)}%` : '--'}`,
   ];
   return lines.join('<br/>');
 }
 </script>
 
 <template>
-  <EChart :option="option" :height="height" />
+  <EChart :option="option" :height="height" :reset-key="resetKey" />
 </template>

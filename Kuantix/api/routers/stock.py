@@ -17,7 +17,6 @@ from typing import Annotated
 from fastapi import APIRouter, Query, Request
 
 from Kuantix.api.deps import ServiceContainer, get_services, respond
-from Kuantix.analysis.stock_detail import PERIODS
 
 __all__ = ["router"]
 
@@ -32,7 +31,7 @@ def _services(request: Request) -> ServiceContainer:
 
 
 @router.get("/detail/{code}")
-async def stock_detail(
+def stock_detail(
     request: Request,
     code: str,
     market: Annotated[str, Query(description="市场码（CN/US/HK）")] = "CN",
@@ -43,6 +42,9 @@ async def stock_detail(
     ] = DEFAULT_INDICATORS,
 ):
     """个股详情：多周期 K 线 + 技术指标 + 核心数据。
+
+    同步 def 路由（非 async）：内部是 pandas 重采样 + SQLite IO 的同步
+    重计算，FastAPI 会自动放入线程池执行，避免阻塞事件循环。
 
     Args:
         code: 6 位证券代码。
