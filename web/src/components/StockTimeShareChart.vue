@@ -5,12 +5,14 @@
  * - 昨收基准虚线；Y 轴以昨收为中心对称（涨跌幅刻度右侧、价格刻度左侧）
  * - 成交量副图（红绿按分钟涨跌方向）
  * - 十字光标联动 + tooltip（时间/价格/涨跌幅/均价/量）
+ * - 画线工具：趋势线/水平线/矩形/黄金分割/文本（与K线图共用 useChartDrawing）
  * 数据来自 /stock/detail/{code}?period=min1（bars + indicators.vwap）。
  */
 import { computed } from 'vue';
 import type { EChartsCoreOption } from 'echarts/core';
-import type { StockBar } from '../types';
+import type { DrawTool, StockBar } from '../types';
 import { fmtBig } from '../utils/format';
+import { drawSeries, useChartDrawing } from '../composables/useChartDrawing';
 import EChart from './EChart.vue';
 
 const props = withDefaults(
@@ -24,6 +26,8 @@ const props = withDefaults(
     dark?: boolean;
     upColor?: string;
     downColor?: string;
+    /** 画线工具（绘制完成后自动复位为 none） */
+    drawTool?: DrawTool;
   }>(),
   {
     vwap: () => [],
@@ -32,8 +36,11 @@ const props = withDefaults(
     dark: false,
     upColor: '#ef4444',
     downColor: '#22c55e',
+    drawTool: 'none',
   },
 );
+
+const emit = defineEmits<{ 'update:drawTool': [tool: DrawTool] }>();
 
 const up = computed(() => props.upColor);
 const down = computed(() => props.downColor);
@@ -95,6 +102,17 @@ const resetKey = computed(
       props.bars[props.bars.length - 1]?.datetime ?? ''
     }`,
 );
+
+/* ---------------- 画线工具（与K线图共用逻辑） ---------------- */
+
+const { onChartReady, clearDrawings, marks } = useChartDrawing({
+  drawTool: () => props.drawTool,
+  barCount: () => props.bars.length,
+  resetKey: () => resetKey.value,
+  resetTool: () => emit('update:drawTool', 'none'),
+});
+
+defineExpose({ clearDrawings });
 
 function pctOf(v: number): string {
   const pc = props.prevClose;
@@ -232,6 +250,8 @@ const option = computed<EChartsCoreOption>(() => {
         yAxisIndex: 2,
         barWidth: '55%',
       },
+      // 画线工具渲染（价格主图坐标系：xAxisIndex 0 / yAxisIndex 0）
+      drawSeries(0, marks.value),
     ],
   };
 });
@@ -260,5 +280,5 @@ function formatTooltip(params: Array<Record<string, unknown>>): string {
 </script>
 
 <template>
-  <EChart :option="option" :height="height" :reset-key="resetKey" />
+  <EChart :option="option" :height="height" :reset-key="resetKey" @ready="onChartReady" />
 </template>

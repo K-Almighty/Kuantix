@@ -283,7 +283,9 @@ const chartHeight = computed(() => {
 
 /* ---------------- 画线 / 全屏 ---------------- */
 
-const mainChartRef = ref<InstanceType<typeof StockKlineChart> | null>(null);
+const mainChartRef = ref<
+  InstanceType<typeof StockKlineChart> | InstanceType<typeof StockTimeShareChart> | null
+>(null);
 
 function clearDrawings(): void {
   mainChartRef.value?.clearDrawings();
@@ -640,6 +642,8 @@ onBeforeUnmount(() => {
               />
               <StockTimeShareChart
                 v-else-if="period === 'min1' && mainDetail"
+                ref="mainChartRef"
+                v-model:draw-tool="drawTool"
                 :bars="mainDetail.bars"
                 :vwap="mainDetail.indicators.vwap ?? []"
                 :prev-close="mainDetail.quote?.prev_close ?? null"
@@ -945,6 +949,10 @@ onBeforeUnmount(() => {
   padding: 6px;
   display: flex;
   flex-direction: column;
+  /* 面板开合时容器必须能收缩（否则 canvas 固定宽度把 grid item 撑住，
+     面板重新打开后图表保持全宽溢出，ResizeObserver 不再触发） */
+  min-width: 0;
+  overflow: hidden;
 }
 .chart-state {
   display: flex;

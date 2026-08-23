@@ -9,22 +9,14 @@
  * - 配色：红涨绿跌（A股习惯，固定）
  * 数据来自 StockDetail（后端 /stock/detail/{code}）。
  */
-import { computed, ref, watch } from 'vue';
-import type * as echarts from 'echarts/core';
+import { computed } from 'vue';
 import type { EChartsCoreOption } from 'echarts/core';
 import type { DrawTool, StockBar, StockIndicators } from '../types';
 import { fmtBig } from '../utils/format';
+import { drawSeries, useChartDrawing } from '../composables/useChartDrawing';
 import EChart from './EChart.vue';
 
-type ChartHandle = ReturnType<typeof echarts.init>;
 type SubPanelKey = 'volume' | 'macd' | 'kdj' | 'rsi' | 'wr' | 'bias' | 'obv';
-
-interface TrendDrawing { kind: 'trend'; x1: number; y1: number; x2: number; y2: number }
-interface HLineDrawing { kind: 'hline'; y: number }
-interface RectDrawing { kind: 'rect'; x1: number; y1: number; x2: number; y2: number }
-interface FibDrawing { kind: 'fib'; x1: number; y1: number; x2: number; y2: number }
-interface TextDrawing { kind: 'text'; x: number; y: number; text: string }
-type Drawing = TrendDrawing | HLineDrawing | RectDrawing | FibDrawing | TextDrawing;
 
 const props = withDefaults(
   defineProps<{
@@ -85,7 +77,6 @@ const props = withDefaults(
 const emit = defineEmits<{ 'update:drawTool': [tool: DrawTool] }>();
 
 const MA_COLORS = ['#f59e0b', '#3b82f6', '#a855f7', '#14b8a6', '#ef4444', '#0ea5e9', '#eab308', '#f472b6'];
-const FIB_LEVELS = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
 
 const up = computed(() => props.upColor);
 const down = computed(() => props.downColor);
@@ -223,72 +214,14 @@ const layout = computed(() => {
 
 /* ---------------- 画线工具 ---------------- */
 
-const drawings = ref<Drawing[]>([]);
-let pending: { x: number; y: number } | null = null;
-const chartHandle = ref<ChartHandle | null>(null);
-
-function onChartReady(chart: ChartHandle): void {
-  chartHandle.value = chart;
-  chart.getZr().on('click', (ev: unknown) => onCanvasClick(ev as { offsetX: number; offsetY: number }));
-}
-
-function onCanvasClick(ev: { offsetX: number; offsetY: number }): void {
-  const chart = chartHandle.value;
-  const tool = props.drawTool;
-  if (!chart || tool === 'none' || props.bars.length === 0) return;
-  let pt: [number, number];
-  try {
-    pt = chart.convertFromPixel({ gridIndex: 0 }, [ev.offsetX, ev.offsetY]) as [number, number];
-  } catch {
-    return;
-  }
-  if (!pt || !Number.isFinite(pt[0]) || !Number.isFinite(pt[1])) return;
-  const x = Math.max(0, Math.min(props.bars.length - 1, Math.round(pt[0])));
-  const y = Math.round(pt[1] * 1e4) / 1e4;
-  if (tool === 'hline') {
-    drawings.value.push({ kind: 'hline', y });
-    finishDraw();
-  } else if (tool === 'text') {
-    const text = window.prompt('输入标注文本：')?.trim();
-    if (text) drawings.value.push({ kind: 'text', x, y, text });
-    finishDraw();
-  } else if (tool === 'trend' || tool === 'rect' || tool === 'fib') {
-    if (!pending) {
-      pending = { x, y };
-    } else {
-      drawings.value.push({ kind: tool, x1: pending.x, y1: pending.y, x2: x, y2: y } as Drawing);
-      pending = null;
-      finishDraw();
-    }
-  }
-}
-
-function finishDraw(): void {
-  pending = null;
-  emit('update:drawTool', 'none');
-}
-
-function clearDrawings(): void {
-  drawings.value = [];
-  pending = null;
-}
+const { onChartReady, clearDrawings, marks } = useChartDrawing({
+  drawTool: () => props.drawTool,
+  barCount: () => props.bars.length,
+  resetKey: () => resetKey.value,
+  resetTool: () => emit('update:drawTool', 'none'),
+});
 
 defineExpose({ clearDrawings });
-
-// 数据集切换后旧画线坐标失效，清空；工具切换时丢弃未完成的第一个锚点
-watch(
-  () => resetKey.value,
-  () => {
-    drawings.value = [];
-    pending = null;
-  },
-);
-watch(
-  () => props.drawTool,
-  () => {
-    pending = null;
-  },
-);
 
 function lastVal(arr: (number | null)[] | undefined): number | null {
   return arr?.[arr.length - 1] ?? null;
@@ -698,60 +631,7 @@ const option = computed<EChartsCoreOption>(() => {
   }
 
   // 画线工具渲染（数据坐标 → markLine/markArea/markPoint，缩放自动跟随）
-  const markLineData: Array<Record<string, unknown> | Array<Record<string, unknown>>> = [];
-  const markAreaData: Array<Array<Record<string, unknown>>> = [];
-  const markPointData: Array<Record<string, unknown>> = [];
-  for (const d of drawings.value) {
-    if (d.kind === 'trend') {
-      markLineData.push([{ coord: [d.x1, d.y1], value: '' }, { coord: [d.x2, d.y2] }]);
-    } else if (d.kind === 'hline') {
-      markLineData.push({ yAxis: d.y, value: d.y.toFixed(2), lineStyle: { color: '#f59e0b' } });
-    } else if (d.kind === 'rect') {
-      markAreaData.push([{ coord: [d.x1, d.y1] }, { coord: [d.x2, d.y2] }]);
-    } else if (d.kind === 'fib') {
-      const xa = Math.min(d.x1, d.x2);
-      const xb = Math.max(d.x1, d.x2);
-      for (const l of FIB_LEVELS) {
-        const yl = d.y1 + (d.y2 - d.y1) * l;
-        markLineData.push([
-          { coord: [xa, yl], value: `${(l * 100).toFixed(1)}% ${yl.toFixed(2)}` },
-          { coord: [xb, yl] },
-        ]);
-      }
-    } else if (d.kind === 'text') {
-      markPointData.push({
-        coord: [d.x, d.y],
-        symbol: 'circle',
-        symbolSize: 2,
-        itemStyle: { color: '#f59e0b' },
-        label: { show: true, formatter: d.text, position: 'top', color: '#f59e0b', fontSize: 11 },
-      });
-    }
-  }
-  series.push({
-    name: '_draw',
-    type: 'line',
-    data: [],
-    xAxisIndex: 0,
-    yAxisIndex: 1,
-    silent: true,
-    z: 100,
-    markLine: {
-      silent: true,
-      symbol: 'none',
-      animation: false,
-      lineStyle: { color: '#f59e0b', width: 1.2 },
-      label: { show: true, position: 'end', fontSize: 9, color: '#b45309', formatter: '{c}' },
-      data: markLineData,
-    },
-    markArea: {
-      silent: true,
-      animation: false,
-      itemStyle: { color: 'rgba(59,130,246,0.10)' },
-      data: markAreaData,
-    },
-    markPoint: { silent: true, animation: false, data: markPointData },
-  });
+  series.push(drawSeries(1, marks.value));
 
   return {
     animation: false,
