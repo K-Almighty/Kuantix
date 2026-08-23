@@ -1,58 +1,104 @@
-# Kuantix
+# Kuantix · 开源 A 股量化研究工作台
 
-本地量化研究工作台。基于 [easy-tdx](https://pypi.org/project/easy-tdx/) `1.20.3` **只读复用**上游行情能力，
-在其之上构建数据湖（L1 vipdoc）、因子库（L2 parquet）、选股与实时监控。
+> 本地优先 · 数据可信 · 指标完备的全栈量化研究平台（FastAPI + Vue 3）
 
-## 设计红线
+Kuantix 是一套面向 A 股市场的开源量化研究工作台，覆盖从行情查看、技术指标分析、条件选股、策略回测到组合优化与盘前盘后复盘的全流程研究环节。项目采用后端（FastAPI）与前端（Vue 3）全栈开源架构，支持本地私有化部署，研究数据在用户自有环境中闭环，兼顾研究灵活性与数据安全性。
 
-| 红线 | 内容 |
-| --- | --- |
-| NF-1 | 上游 `easy_tdx` 包与 `~/.easy_tdx/` **绝对只读**；全部上游调用收敛在 `Kuantix/adapters/` |
-| NF-25 | 证券系数表 `_SECURITY_COEFFICIENTS` 必须 **import 引用**，严禁复制常量 |
-| NF-26 | fail-loud：严禁静默兜底 / 静默降级 / 静默默认值 |
-| NF-5/NF-7 | 市场规则一律经 `MarketProfile`；港美股为显式占位，调用即抛错，不做 A 股降级 |
-| NF-9/NF-12 | 统一信封 `{code, message, data, meta}`；JSON 禁 NaN/Infinity，浮点 6 位 |
-| NF-27 | 写盘后必须回读比对；不一致进隔离区 |
+## 核心定位
 
-## 目录结构
+Kuantix 定位于「个人与小型团队可用的 A 股量化研究工作台」，而非托管式 SaaS 或单一回测引擎。其目标是将机构级量化研究的关键环节——数据、指标、选股、回测、组合、监控、复盘——整合到一个可本地运行、可完全审计的开源系统中，降低量化研究的工程门槛与数据信任成本。
 
-```
-Kuantix/
-├── config.py          # TOML 配置 + Kuantix__SECTION__KEY 环境变量覆盖
-├── cli.py             # Typer CLI 根骨架（全局 --json）
-├── main.py            # Kuantix serve：FastAPI 应用工厂
-├── core/              # 契约层（不得 import easy_tdx）
-│   ├── fail_loud.py   #   fail-loud 异常与断言族
-│   ├── envelope.py    #   统一信封 + 数值安全序列化
-│   ├── market.py      #   MarketProfile（CN 完整 / HK·US 占位）
-│   ├── contracts.py   #   Bar / Security / Quote / Alert / ...
-│   ├── plugins.py     #   插件注册表
-│   └── eventbus.py    #   进程内事件总线
-└── adapters/          # 全项目唯一 import easy_tdx 的包
-    ├── coefficients.py   # NF-25 系数 import 引用 + UNKNOWN 拒绝
-    ├── tdx_client.py     # 三链路工厂（MacClient / TdxClient / MacExClient）
-    ├── universe.py       # 全市场枚举（每页新连接，RD-10）
-    ├── quotation.py      # K 线/报价（vol 股→手 ÷100，RD-8）
-    ├── vipdoc_writer.py  # 落盘（uint32 上界 + 自补 fsync + 回读校验）
-    └── known_hosts.py    # 只读加载上游 known_hosts（NF-20）
-```
+## 目标用户
 
-## 安装
+- **个人量化研究者与业余交易者**：希望以低成本搭建自有研究环境，避免对商业数据终端与闭源平台的依赖。
+- **量化策略开发者**：需要可扩展的指标库、选股框架与回测引擎，并能够基于源码进行二次开发与审计。
+- **小型投研团队**：需要统一的本地数据底座与协作式的研究、监控工作流。
+- **教学与研究人员**：可将完整源码作为量化方法论与工程实现的教学样本。
 
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-```
+## 解决的关键痛点
+
+- **数据信任缺失**：商业终端黑盒化、数据口径不可核查。Kuantix 坚持 fail-loud 原则，禁止静默兜底与静默降级，并对落盘数据执行回读校验与隔离区机制，确保数据可追溯、可验证。
+- **工具碎片化**：行情、选股、回测、组合往往分散在多个互不联通的工具中。Kuantix 以统一的数据底座与 API 契约串联全流程。
+- **本地隐私与合规风险**：行情与持仓等敏感数据存在外泄隐患。Kuantix 默认本地运行，数据不出本机。
+- **工程门槛高**：自研量化系统需处理行情接入、因子计算、回测框架等大量基础设施。Kuantix 提供开箱即用的模块化能力。
+- **A 股特殊性被忽视**：多数开源框架以美股为中心。Kuantix 以 A 股市场规则（涨跌停、T+1、所属板块等）为第一公民建模。
+
+## 主要功能特性
+
+### 行情与个股详情
+- 多周期 K 线（日 / 周 / 分钟）与分时走势可视化。
+- 完备技术指标库：MA、MACD、KDJ、RSI、BOLL、ENE、SAR、WR、BIAS、OBV、VWAP。
+- 实时报价、盘口（五档）、逐笔成交、资金流向等明细数据。
+
+### 条件选股
+- 基于插件化筛选条件的选股框架，支持单因子选股与多条件组合选股。
+- 选股批次管理与结果导出。
+
+### 策略与回测
+- 策略库管理（保存、查看、多策略组合回测）。
+- 回测引擎支持带买卖点标注的 K 线回放，输出完整回测结果与任务进度追踪。
+
+### 因子研究
+- 因子库与因子计算任务编排。
+- 因子有效性报告、多因子合成与综合排名。
+
+### 组合与优化
+- 组合回测与结果分析面板。
+- 参数网格寻优，支持一键寻优全部策略。
+
+### 实时监控
+- 自选列表与自定义监控规则（含预设规则模板）。
+- 持仓盈亏登记与告警历史，支持推送通道。
+
+### 盘前 / 盘后分析
+- 盘前分析报告：消息面、基本面画像、技术扫描。
+- 盘后复盘报告：涨跌停汇总、技术扫描。
+
+### 数据底座
+- 本地数据湖（SQLite 行情库），支持数据回补、完整性校验与隔离区管理。
+- 上游行情能力只读复用，全量上游调用收敛于适配层。
+
+## 技术架构
+
+- **后端**：Python + FastAPI，模块化路由（`stock` / `data` / `monitor` / `screen` / `backtest` / `factor` / `portfolio` / `optimize` / `strategies` / `analysis` / `settings`）。
+- **前端**：Vue 3 + Vite + TypeScript + ECharts + Pinia，提供 K 线、分时、因子、组合等交互式研究界面。
+- **数据层**：本地 SQLite 行情库为主、实时行情叠加；上游行情接入通过只读适配层收敛。
+- **契约层**：统一响应信封 `{code, message, data, meta}`，数值安全序列化（禁 NaN / Infinity，浮点 6 位）。
+
+## 使用场景
+
+- 盘前快速浏览消息面与基本面画像，制定当日观察清单。
+- 盘中通过自选监控规则接收异动告警。
+- 盘后运行复盘报告，扫描涨跌停与技术形态。
+- 基于指标与因子库进行选股与策略研究。
+- 使用回测与参数寻优验证策略假设，并以组合回测评估整体表现。
+- 教学演示：从源码理解量化系统的工程实现。
+
+## 价值主张与差异化优势
+
+- **全栈开源、可审计**：后端与前端的完整源码开放，研究逻辑透明、可二次开发。
+- **本地优先、数据私有**：默认本地部署，敏感数据不出本机。
+- **数据可信优先**：fail-loud 与回读校验从架构层面杜绝静默错误，建立数据信任。
+- **指标完备、A 股原生**：内置覆盖趋势、摆动、能量、通道的全套技术指标，并以 A 股市场机制为建模基础。
+- **模块化、可扩展**：选股条件、监控判据、因子等均以插件化方式组织，便于扩展。
 
 ## 快速开始
 
 ```bash
+# 后端
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
 Kuantix --help                 # 命令骨架
 Kuantix version --json         # 版本 + 上游锁定版本
 Kuantix doctor --json          # 环境体检（上游版本 / 系数表 / 市场 / 目录隔离）
 Kuantix config show            # 解析后的完整配置
 Kuantix serve --dry-run --json # 打印将挂载的路由
 Kuantix serve                  # 起 REST 服务（默认 127.0.0.1:8899）
+
+# 前端
+cd web
+npm install
+npm run dev                    # 默认 http://127.0.0.1:5173
 ```
 
 ## 配置
@@ -68,10 +114,25 @@ Kuantix__PATHS__ROOT=/tmp/Kuantix Kuantix doctor
 ## 测试
 
 ```bash
-pytest                                  # 批次 1 验收用例（Kuantix/tests/）
+pytest                                  # 批次验收用例（Kuantix/tests/）
 pytest -c /dev/null tests/redlines -q   # 架构红线静态检查
-pytest -m network                       # 需外网 TDX 服务器的用例
+pytest -m network                       # 需外网行情服务器的用例
 ```
+
+## 设计原则
+
+| 红线 | 内容 |
+| --- | --- |
+| NF-1 | 上游行情包与本地数据目录**绝对只读**；全部上游调用收敛在适配层 |
+| NF-25 | 证券系数表必须 **import 引用**，严禁复制常量 |
+| NF-26 | fail-loud：严禁静默兜底 / 静默降级 / 静默默认值 |
+| NF-5/NF-7 | 市场规则一律经 `MarketProfile`；港美股为显式占位，调用即抛错，不做 A 股降级 |
+| NF-9/NF-12 | 统一信封 `{code, message, data, meta}`；JSON 禁 NaN/Infinity，浮点 6 位 |
+| NF-27 | 写盘后必须回读比对；不一致进隔离区 |
+
+## 项目状态
+
+当前版本 **v0.1.0**。已具备行情详情、条件选股、策略回测、因子研究、组合优化、实时监控与盘前盘后分析等核心模块。后续路线聚焦于数据层稳定性、回测引擎性能与策略生态建设。
 
 ## 许可
 
