@@ -1,9 +1,10 @@
 <script setup lang="ts">
 /**
  * 个股 K 线图（StockKlineChart）：通达信风格专业图表引擎。
- * - 主图：蜡烛 + MA（窗口自定义）+ BOLL / ENE / SAR 叠加
- * - 副图：VOL / MACD / KDJ / RSI / WR / BIAS / OBV 独立开关，多面板动态布局
- * - 左侧涨跌幅百分比刻度 + 右侧价格刻度（隐形高低线承接范围，缩放联动）
+ * - 主图：蜡烛 + 叠加指标单选（MA 窗口自定义 / EXPMA 前端计算 / BOLL / ENE / SAR）
+ * - 副图：VOL / MACD / KDJ / RSI / WR / BIAS / OBV 独立开关，像素级多面板布局
+ *   （每面板固定 110px，面板越多图表总高越大，避免压缩到看不清）
+ * - 左右两侧均显示价格刻度（隐形高低线承接左轴范围，缩放联动）
  * - 十字光标全图联动 + 滚轮缩放 + 拖拽平移 + tooltip（OHLCV + MA）
  * - 画线工具：趋势线 / 水平线 / 矩形 / 黄金分割 / 文本标注（数据坐标，缩放自动跟随）
  * - 配色：红涨绿跌（A股习惯，固定）
@@ -11,7 +12,7 @@
  */
 import { computed } from 'vue';
 import type { EChartsCoreOption } from 'echarts/core';
-import type { DrawTool, StockBar, StockIndicators } from '../types';
+import type { DrawTool, MainIndicator, StockBar, StockIndicators } from '../types';
 import { fmtBig } from '../utils/format';
 import { drawSeries, useChartDrawing } from '../composables/useChartDrawing';
 import EChart from './EChart.vue';
@@ -25,11 +26,8 @@ const props = withDefaults(
     height?: string;
     /** 当前周期键：决定时间轴标签粒度 */
     period?: string;
-    /** 主图指标开关 */
-    showMa?: boolean;
-    showBoll?: boolean;
-    showEne?: boolean;
-    showSar?: boolean;
+    /** 主图叠加指标（单选；height 作为无副图时的基准总高，副图越多实际总高越大） */
+    mainIndicator?: MainIndicator;
     /** MA 均线窗口（参数面板自定义） */
     maWindows?: number[];
     /** 副图指标开关 */
@@ -54,11 +52,8 @@ const props = withDefaults(
     indicators: () => ({}),
     height: '560px',
     period: 'day',
-    showMa: true,
-    showBoll: false,
-    showEne: false,
-    showSar: false,
-    maWindows: () => [5, 10, 20, 60],
+    mainIndicator: 'ma',
+    maWindows: () => [5, 10, 20, 60, 365],
     showVolume: true,
     showMacd: true,
     showKdj: false,
@@ -132,16 +127,6 @@ const resetKey = computed(
     }`,
 );
 
-/** 涨跌幅刻度基准：区间首根开盘价（百分比坐标语义） */
-const pctBase = computed(() => props.bars[0]?.open ?? props.bars[0]?.close ?? null);
-
-function pctLabel(v: number): string {
-  const base = pctBase.value;
-  if (base == null || !base) return v.toFixed(2);
-  const p = (v / base - 1) * 100;
-  return `${p >= 0 ? '+' : ''}${p.toFixed(2)}%`;
-}
-
 function volColor(bar: StockBar): string {
   return bar.close >= bar.open ? up.value : down.value;
 }
@@ -184,7 +169,23 @@ const axisLabels = computed(() => {
   return out;
 });
 
-/** 动态 grid 布局：主图固定 + 副图随开关追加（等分 68%~87% 区域） */
+/**
+ * 像素级多面板布局（副图看不清的根治方案）：
+ * - 每个副图面板固定 SUB_H 像素，不随面板数量压缩；
+ * - 面板越多总高越大（页面滚动查看），主图随面板数轻微收缩但 ≥ MAIN_MIN；
+ * - height prop 语义 = 无副图时的基准总高。
+ */
+const TOP_PAD = 26; // 主图指标标签行
+const BOTTOM_PAD = 44; // 时间轴标签 + 缩放滑条
+const SUB_H = 110; // 每个副图面板高度
+const SUB_GAP = 6; // 面板间隙
+const MAIN_MIN = 300; // 主图最小高度
+
+function parseHeightPx(h: string): number {
+  const m = /^(\d+(?:\.\d+)?)px$/.exec(h.trim());
+  return m ? Number(m[1]) : 560;
+}
+
 const layout = computed(() => {
   const keys: SubPanelKey[] = [];
   if (props.showVolume) keys.push('volume');
@@ -195,21 +196,44 @@ const layout = computed(() => {
   if (props.showBias) keys.push('bias');
   if (props.showObv) keys.push('obv');
 
-  const grids: Array<Record<string, unknown>> = [{ left: 68, right: 60, top: 26, height: '40%' }];
-  const panels: Array<{ key: SubPanelKey; top: number }> = [];
   const n = keys.length;
-  if (n > 0) {
-    const areaTop = 68;
-    const areaBottom = 87;
-    const gap = 1.5;
-    const each = (areaBottom - areaTop - gap * (n - 1)) / n;
-    keys.forEach((key, idx) => {
-      const top = areaTop + (each + gap) * idx;
-      grids.push({ left: 68, right: 60, top: `${top}%`, height: `${each}%` });
-      panels.push({ key, top });
-    });
+  const baseH = parseHeightPx(props.height);
+  const mainH = Math.max(MAIN_MIN, baseH - TOP_PAD - BOTTOM_PAD - n * 30);
+  const totalHeight = TOP_PAD + mainH + n * (SUB_H + SUB_GAP) + BOTTOM_PAD;
+
+  const grids: Array<Record<string, unknown>> = [
+    { left: 68, right: 60, top: TOP_PAD, height: mainH },
+  ];
+  const panels: Array<{ key: SubPanelKey; top: number }> = [];
+  let top = TOP_PAD + mainH + SUB_GAP;
+  for (const key of keys) {
+    grids.push({ left: 68, right: 60, top, height: SUB_H });
+    panels.push({ key, top });
+    top += SUB_H + SUB_GAP;
   }
-  return { grids, panels };
+  return { grids, panels, totalHeight };
+});
+
+/** EXPMA 指数均线（通达信默认窗口 12/50；后端无此指标，前端从收盘价计算） */
+const EXPMA_WINDOWS = [12, 50];
+const EXPMA_COLORS = ['#f472b6', '#22d3ee'];
+
+function emaFromCloses(closes: number[], span: number): (number | null)[] {
+  const k = 2 / (span + 1);
+  let prev: number | null = null;
+  return closes.map((c) => {
+    prev = prev == null ? c : c * k + prev * (1 - k);
+    return prev;
+  });
+}
+
+const expmaLines = computed(() => {
+  const closes = props.bars.map((b) => b.close);
+  return EXPMA_WINDOWS.map((w, i) => ({
+    w,
+    color: EXPMA_COLORS[i],
+    data: emaFromCloses(closes, w),
+  }));
 });
 
 /* ---------------- 画线工具 ---------------- */
@@ -251,7 +275,7 @@ const option = computed<EChartsCoreOption>(() => {
     axisTick: { show: false },
     axisLine: { lineStyle: { color: theme.value.split } },
   });
-  // 主图 yAxis：0 = 左侧涨跌幅百分比刻度；1 = 右侧价格刻度
+  // 主图 yAxis：0 = 左侧价格刻度；1 = 右侧价格刻度（同一范围双轴）
   yAxes.push({
     type: 'value',
     gridIndex: 0,
@@ -260,8 +284,8 @@ const option = computed<EChartsCoreOption>(() => {
     splitLine: { show: false },
     axisLine: { show: false },
     axisTick: { show: false },
-    axisLabel: { color: dim, fontSize: 10, formatter: (v: number) => pctLabel(v) },
-    axisPointer: { label: { formatter: (p: { value: number }) => pctLabel(p.value) } },
+    axisLabel: { color: dim, fontSize: 10, formatter: (v: number) => v.toFixed(2) },
+    axisPointer: { label: { formatter: (p: { value: number }) => p.value.toFixed(2) } },
   });
   yAxes.push({
     type: 'value',
@@ -271,7 +295,7 @@ const option = computed<EChartsCoreOption>(() => {
     splitLine: { show: true, lineStyle: { color: theme.value.split } },
     axisLine: { show: false },
     axisTick: { show: false },
-    axisLabel: { color: dim, fontSize: 10 },
+    axisLabel: { color: dim, fontSize: 10, formatter: (v: number) => v.toFixed(2) },
   });
 
   // 蜡烛（主图，价格轴）
@@ -303,9 +327,9 @@ const option = computed<EChartsCoreOption>(() => {
   }
   series.push(candleSeries);
 
-  // 左侧涨跌幅轴的隐形高低线（承接与蜡烛一致的范围，缩放联动）
+  // 左侧价格轴的隐形高低线（承接与蜡烛一致的范围，缩放联动）
   series.push({
-    name: '_pctHigh',
+    name: '_axisHigh',
     type: 'line',
     data: props.bars.map((b) => b.high),
     xAxisIndex: 0,
@@ -317,7 +341,7 @@ const option = computed<EChartsCoreOption>(() => {
     emphasis: { disabled: true },
   });
   series.push({
-    name: '_pctLow',
+    name: '_axisLow',
     type: 'line',
     data: props.bars.map((b) => b.low),
     xAxisIndex: 0,
@@ -329,29 +353,30 @@ const option = computed<EChartsCoreOption>(() => {
     emphasis: { disabled: true },
   });
 
-  // 主图指标标签行（通达信风格：指标名 + 最新值）
+  // 主图指标标签行（通达信风格：指标名 + 最新值；单选，同一时刻只有一组）
   const mainSegs: Array<[string, string]> = [];
-  if (props.showMa) {
+  if (props.mainIndicator === 'ma') {
     props.maWindows.forEach((w, i) => {
       const v = lastVal(props.indicators[`ma${w}`] as (number | null)[] | undefined);
       mainSegs.push([`MA${w}:${fmt2(v)}`, MA_COLORS[i % MA_COLORS.length]]);
     });
-  }
-  if (props.showBoll && props.indicators.boll) {
+  } else if (props.mainIndicator === 'expma') {
+    for (const l of expmaLines.value) {
+      mainSegs.push([`EMA${l.w}:${fmt2(lastVal(l.data))}`, l.color]);
+    }
+  } else if (props.mainIndicator === 'boll' && props.indicators.boll) {
     const b = props.indicators.boll;
     mainSegs.push([
       `BOLL(20,2) UP:${fmt2(lastVal(b.upper))} MID:${fmt2(lastVal(b.mid))} LOW:${fmt2(lastVal(b.lower))}`,
       '#a78bfa',
     ]);
-  }
-  if (props.showEne && props.indicators.ene) {
+  } else if (props.mainIndicator === 'ene' && props.indicators.ene) {
     const e = props.indicators.ene;
     mainSegs.push([
       `ENE UP:${fmt2(lastVal(e.upper))} ENE:${fmt2(lastVal(e.ene))} LOW:${fmt2(lastVal(e.lower))}`,
       '#f472b6',
     ]);
-  }
-  if (props.showSar && props.indicators.sar) {
+  } else if (props.mainIndicator === 'sar' && props.indicators.sar) {
     mainSegs.push([`SAR:${fmt2(lastVal(props.indicators.sar.sar))}`, '#60a5fa']);
   }
   let gx = 72;
@@ -368,7 +393,7 @@ const option = computed<EChartsCoreOption>(() => {
   }
 
   // MA 均线（主图叠加，窗口自定义）
-  if (props.showMa) {
+  if (props.mainIndicator === 'ma') {
     props.maWindows.forEach((w, i) => {
       const arr = props.indicators[`ma${w}`] as (number | null)[] | undefined;
       if (!arr) return;
@@ -386,8 +411,24 @@ const option = computed<EChartsCoreOption>(() => {
     });
   }
 
+  // EXPMA 指数均线（主图叠加，前端计算）
+  if (props.mainIndicator === 'expma') {
+    for (const l of expmaLines.value) {
+      series.push({
+        name: `EMA${l.w}`,
+        type: 'line',
+        data: l.data,
+        xAxisIndex: 0,
+        yAxisIndex: 1,
+        showSymbol: false,
+        lineStyle: { width: 1, color: l.color },
+        connectNulls: false,
+      });
+    }
+  }
+
   // BOLL 布林带（主图）
-  if (props.showBoll && props.indicators.boll) {
+  if (props.mainIndicator === 'boll' && props.indicators.boll) {
     const { upper, mid, lower } = props.indicators.boll;
     for (const [nm, arr, col] of [
       ['BOLL_UP', upper, '#a78bfa'],
@@ -408,7 +449,7 @@ const option = computed<EChartsCoreOption>(() => {
   }
 
   // ENE 轨道线（主图）
-  if (props.showEne && props.indicators.ene) {
+  if (props.mainIndicator === 'ene' && props.indicators.ene) {
     const { upper, ene, lower } = props.indicators.ene;
     for (const [nm, arr, col] of [
       ['ENE_UP', upper, '#f472b6'],
@@ -429,7 +470,7 @@ const option = computed<EChartsCoreOption>(() => {
   }
 
   // SAR 抛物线转向（主图散点）
-  if (props.showSar && props.indicators.sar) {
+  if (props.mainIndicator === 'sar' && props.indicators.sar) {
     series.push({
       name: 'SAR',
       type: 'scatter',
@@ -621,7 +662,7 @@ const option = computed<EChartsCoreOption>(() => {
       graphic.push({
         type: 'text',
         left: px,
-        top: `${panel.top + 0.4}%`,
+        top: panel.top + 2,
         silent: true,
         z: 300,
         style: { text, fill: color, fontSize: 10, fontFamily: 'ui-monospace, monospace' },
@@ -715,7 +756,7 @@ function formatTooltip(params: Array<Record<string, unknown>>): string {
     `量 ${fmtBig(bar.vol)} · 额 ${fmtBig(bar.amount)}`,
     `换手 ${bar.turnover > 0 ? `${(bar.turnover * 100).toFixed(2)}%` : '--'}`,
   ];
-  if (props.showMa) {
+  if (props.mainIndicator === 'ma') {
     const maParts = props.maWindows
       .map((w, i) => {
         const arr = props.indicators[`ma${w}`] as (number | null)[] | undefined;
@@ -731,5 +772,5 @@ function formatTooltip(params: Array<Record<string, unknown>>): string {
 </script>
 
 <template>
-  <EChart :option="option" :height="height" :reset-key="resetKey" @ready="onChartReady" />
+  <EChart :option="option" :height="`${layout.totalHeight}px`" :reset-key="resetKey" @ready="onChartReady" />
 </template>

@@ -371,7 +371,9 @@ class StockDetailService:
         windows = sorted({int(w) for w in ma_windows if 1 <= int(w) <= 500})
 
         if period in _MINUTE_PERIODS:
-            return self._detail_minute(code, market, period, limit, indicators)
+            return self._detail_minute(
+                code, market, period, limit, indicators, ma_windows=windows
+            )
         return self._detail_daily(
             code, market, period, limit, indicators,
             adjust=adjust, ma_windows=windows,
@@ -478,6 +480,8 @@ class StockDetailService:
         period: str,
         limit: int,
         indicators: Sequence[str],
+        *,
+        ma_windows: Sequence[int] = (5, 10, 20, 60),
     ) -> dict[str, Any]:
         # min1（当日分时）：最近一个交易日；min5：最近 5 个自然日 1 分钟；
         # min15/min30/min60：60 天窗口读 1 分钟线后按桶聚合（tdx 回退时
@@ -545,6 +549,7 @@ class StockDetailService:
         return self._assemble(
             code, market, period, out_bars, indicators, available=True,
             data_source=data_source, listing_date=listing_date, quote=quote,
+            ma_windows=ma_windows,
         )
 
     def _minute_unavailable(

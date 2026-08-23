@@ -13,6 +13,7 @@ import {
   MarkAreaComponent,
   MarkPointComponent,
   VisualMapComponent,
+  GraphicComponent,
 } from 'echarts/components';
 import { CanvasRenderer } from 'echarts/renderers';
 import type { EChartsCoreOption } from 'echarts/core';
@@ -33,6 +34,7 @@ echarts.use([
   MarkAreaComponent,
   MarkPointComponent,
   VisualMapComponent,
+  GraphicComponent,
   CanvasRenderer,
 ]);
 

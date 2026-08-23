@@ -12,7 +12,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { api } from '../api';
-import type { Adjust, DrawTool, Period, StockDetail as StockDetailData } from '../types';
+import type { Adjust, DrawTool, MainIndicator, Period, StockDetail as StockDetailData } from '../types';
 import type { SecurityHit } from '../types/data';
 import { fmtBig } from '../utils/format';
 import { toastWarning } from '../utils/toast';
@@ -56,6 +56,15 @@ const DRAW_TOOLS: Array<{ key: DrawTool; label: string }> = [
   { key: 'text', label: '文本' },
 ];
 
+/** 主图叠加指标（单选；再次点击当前项取消叠加） */
+const MAIN_INDICATORS: Array<{ key: MainIndicator; label: string }> = [
+  { key: 'ma', label: 'MA' },
+  { key: 'expma', label: 'EXPMA' },
+  { key: 'boll', label: 'BOLL' },
+  { key: 'ene', label: 'ENE' },
+  { key: 'sar', label: 'SAR' },
+];
+
 function isPeriod(v: unknown): v is Period {
   return typeof v === 'string' && PERIODS.some((p) => p.key === v);
 }
@@ -64,6 +73,21 @@ function isAdjust(v: unknown): v is Adjust {
 }
 function isMinute(p: Period): boolean {
   return p.startsWith('min');
+}
+
+function isMainIndicator(v: unknown): v is MainIndicator {
+  return typeof v === 'string' && MAIN_INDICATORS.some((m) => m.key === v);
+}
+
+/** 主图指标单选状态；迁移旧版多选开关（按 SAR > ENE > BOLL > MA 取优先级最高的一个） */
+function initMainIndicator(): MainIndicator {
+  const raw = localStorage.getItem(`${LS_KEY}.mainIndicator`);
+  if (isMainIndicator(raw)) return raw;
+  if (localStorage.getItem(`${LS_KEY}.showSar`) === '1') return 'sar';
+  if (localStorage.getItem(`${LS_KEY}.showEne`) === '1') return 'ene';
+  if (localStorage.getItem(`${LS_KEY}.showBoll`) === '1') return 'boll';
+  if (localStorage.getItem(`${LS_KEY}.showMa`) !== '0') return 'ma';
+  return 'none';
 }
 
 /** localStorage 持久化开关 */
@@ -88,11 +112,8 @@ function initAdjust(): Adjust {
 const period = ref<Period>(initPeriod());
 const adjust = ref<Adjust>(initAdjust());
 
-// 主图指标开关
-const showMa = persistedFlag('showMa', true);
-const showBoll = persistedFlag('showBoll', false);
-const showEne = persistedFlag('showEne', false);
-const showSar = persistedFlag('showSar', false);
+// 主图叠加指标（单选：MA / EXPMA / BOLL / ENE / SAR / 无）
+const mainIndicator = ref<MainIndicator>(initMainIndicator());
 // 副图指标开关
 const showVolume = persistedFlag('showVolume', true);
 const showMacd = persistedFlag('showMacd', true);
@@ -103,18 +124,26 @@ const showBias = persistedFlag('showBias', false);
 const showObv = persistedFlag('showObv', false);
 
 // MA 参数（自定义窗口）
+const MA_WINDOWS_DEFAULT = [5, 10, 20, 60, 365];
+const MA_WINDOWS_LEGACY = [5, 10, 20, 60];
+
 function initMaWindows(): number[] {
   const raw = localStorage.getItem(`${LS_KEY}.maWindows`);
   if (raw) {
     try {
       const arr = JSON.parse(raw) as unknown[];
       const nums = arr.filter((v) => typeof v === 'number' && v >= 1 && v <= 500).map(Number);
-      if (nums.length >= 1 && nums.length <= 6) return [...new Set(nums)].sort((a, b) => a - b);
+      if (nums.length >= 1 && nums.length <= 6) {
+        const unique = [...new Set(nums)].sort((a, b) => a - b);
+        // 旧版默认值迁移为含 365 日均线的新默认；用户自定义值保持不变
+        if (unique.join(',') === MA_WINDOWS_LEGACY.join(',')) return [...MA_WINDOWS_DEFAULT];
+        return unique;
+      }
     } catch {
       /* 忽略损坏数据 */
     }
   }
-  return [5, 10, 20, 60];
+  return [...MA_WINDOWS_DEFAULT];
 }
 const maWindows = ref<number[]>(initMaWindows());
 const maKey = computed(() => maWindows.value.join(','));
@@ -260,26 +289,10 @@ function ensureAll(): void {
   }
 }
 
-/* ---------------- 图表高度（副图开关数量自适应） ---------------- */
-
-const subPanelCount = computed(
-  () =>
-    [
-      showVolume.value,
-      showMacd.value,
-      showKdj.value,
-      showRsi.value,
-      showWr.value,
-      showBias.value,
-      showObv.value,
-    ].filter(Boolean).length,
-);
-
-const chartHeight = computed(() => {
-  if (multiCount.value !== 0) return '400px';
-  const extra = Math.max(0, subPanelCount.value - 2) * 80;
-  return `${520 + extra}px`;
-});
+/* ---------------- 图表高度 ---------------- */
+/* 基准总高（无副图时）：副图面板高度由 StockKlineChart 内部按每面板 110px 追加，
+   面板越多图表越高（页面滚动），不再压缩主图/副图导致看不清 */
+const chartHeight = computed(() => (multiCount.value === 0 ? '620px' : '340px'));
 
 /* ---------------- 画线 / 全屏 ---------------- */
 
@@ -404,10 +417,6 @@ watch(adjust, (a) => {
 });
 
 const flagMap: Record<string, ReturnType<typeof ref<boolean>>> = {
-  showMa,
-  showBoll,
-  showEne,
-  showSar,
   showVolume,
   showMacd,
   showKdj,
@@ -426,6 +435,14 @@ watch(
     });
   },
 );
+
+watch(mainIndicator, (v) => {
+  localStorage.setItem(`${LS_KEY}.mainIndicator`, v);
+  // 迁移完成：清理旧版多选 key
+  ['showMa', 'showBoll', 'showEne', 'showSar'].forEach((k) =>
+    localStorage.removeItem(`${LS_KEY}.${k}`),
+  );
+});
 
 watch([code, adjust, maKey, period], () => void ensureAll());
 watch(slotPeriods, () => void ensureAll(), { deep: true });
@@ -477,7 +494,7 @@ onBeforeUnmount(() => {
           <h3>指标参数设置</h3>
           <div class="field">
             <label>MA 均线窗口（逗号分隔，1-6 个，每个 1-500）</label>
-            <input v-model="maInput" class="input" placeholder="如 5,10,20,60" />
+            <input v-model="maInput" class="input" placeholder="如 5,10,20,60,365" />
           </div>
           <p class="ma-hint">
             MACD(12,26,9)、KDJ(9,3,3)、BOLL(20,2)、RSI(6,12,24) 等暂为通达信默认参数。
@@ -592,13 +609,25 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <div class="tb-row tb-row-second">
-            <div class="tb-group" title="主图指标">
+            <div class="tb-group" title="主图叠加指标（单选，再次点击取消叠加）">
               <span class="tb-label">主图</span>
-              <label class="chk"><input v-model="showMa" type="checkbox" />MA</label>
-              <label class="chk"><input v-model="showBoll" type="checkbox" />BOLL</label>
-              <label class="chk"><input v-model="showEne" type="checkbox" />ENE</label>
-              <label class="chk"><input v-model="showSar" type="checkbox" />SAR</label>
-              <button class="tb-btn tb-btn-xs" title="指标参数设置" @click="openMaModal">参数</button>
+              <button
+                v-for="m in MAIN_INDICATORS"
+                :key="m.key"
+                class="tb-btn tb-btn-xs"
+                :class="{ active: mainIndicator === m.key }"
+                @click="mainIndicator = mainIndicator === m.key ? 'none' : m.key"
+              >
+                {{ m.label }}
+              </button>
+              <button
+                v-if="mainIndicator === 'ma'"
+                class="tb-btn tb-btn-xs"
+                title="指标参数设置"
+                @click="openMaModal"
+              >
+                参数
+              </button>
             </div>
             <div class="tb-group" title="副图指标">
               <span class="tb-label">副图</span>
@@ -658,10 +687,7 @@ onBeforeUnmount(() => {
                 :bars="mainDetail.bars"
                 :indicators="mainDetail.indicators"
                 :period="period"
-                :show-ma="showMa"
-                :show-boll="showBoll"
-                :show-ene="showEne"
-                :show-sar="showSar"
+                :main-indicator="mainIndicator"
                 :ma-windows="maWindows"
                 :show-volume="showVolume"
                 :show-macd="showMacd"
@@ -713,10 +739,7 @@ onBeforeUnmount(() => {
                 :bars="slotState(i - 1).detail!.bars"
                 :indicators="slotState(i - 1).detail!.indicators"
                 :period="slotPeriods[i - 1]"
-                :show-ma="showMa"
-                :show-boll="showBoll"
-                :show-ene="showEne"
-                :show-sar="showSar"
+                :main-indicator="mainIndicator"
                 :ma-windows="maWindows"
                 :show-volume="showVolume"
                 :show-macd="showMacd"

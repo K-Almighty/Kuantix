@@ -185,3 +185,6 @@ export interface StockQuoteLite {
 
 /** 画线工具（K 线图表交互：趋势线/水平线/矩形/黄金分割/文本） */
 export type DrawTool = 'none' | 'trend' | 'hline' | 'rect' | 'fib' | 'text';
+
+/** 主图叠加指标（单选；EXPMA 前端计算，其余来自后端 indicators） */
+export type MainIndicator = 'none' | 'ma' | 'expma' | 'boll' | 'ene' | 'sar';
